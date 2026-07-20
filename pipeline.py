@@ -1589,9 +1589,13 @@ def _exec_run(p: Pipeline, language: str, task: str,
                      "arguments are required" in (stderr + stdout).lower() or
                      "expected" in (stderr + stdout).lower() and "argument" in (stderr + stdout).lower()))
         if _arg_err and not code.lstrip().startswith("#_arg_retried"):
+            # Generate random test values instead of hardcoded ones
+            _rand_vals = ' '.join(
+                str(round(__import__('random').uniform(-100, 100), 2))
+                for _ in range(5))
             _arg_cmd = _wrap_with_timeout(
-                f'{_run_cmd("python")} /workspace/tmp/pipeline_run.py 10 5', 15)
-            _send_to_terminal(f'echo "\\n\\033[1;36m[Pipeline] Retrying with test args: 10 5\\033[0m"')
+                f'{_run_cmd("python")} /workspace/tmp/pipeline_run.py {_rand_vals}', 15)
+            _send_to_terminal(f'echo "\\n\\033[1;36m[Pipeline] Retrying with random args: {_rand_vals}\\033[0m"')
             _arg_exit, _arg_out, _arg_err_out = docker_env.exec_command(
                 _arg_cmd, timeout=45, demux=True)
             if _arg_exit == 0:
