@@ -23,6 +23,7 @@ $VENV_PYTHON "$JARVIS_DIR/jarv2.py" &
 JARVIS_PID=$!
 
 sleep 2
+rm -f /tmp/auto_responder.lock
 bash "$JARVIS_DIR/auto_responder.sh" &
 RESPONDER_PID=$!
 
