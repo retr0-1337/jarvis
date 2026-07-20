@@ -466,6 +466,13 @@ def ask(user_text, max_tokens=512, source="text", chat_id=""):
     if not is_pentest and re.search(r'try\s+CVE-', lower):
         is_pentest = True
 
+    # "How does X work" / "how to use X" / "what is X" are knowledge questions, not pentest actions
+    _is_knowledge_question = bool(re.match(
+        r'^(how|what|why|when|where|which|who|explain|tell me about|describe|define|compare)\b',
+        lower))
+    if is_pentest and _is_knowledge_question:
+        is_pentest = False
+
     if is_pentest and not edit_mode and "cv" not in lower:
         try:
             sys.path.insert(0, str(SECURITY_DB_DIR))
@@ -480,6 +487,10 @@ def ask(user_text, max_tokens=512, source="text", chat_id=""):
     exploit_keywords = ["exploit", "poc", "proof of concept", "vulnerability", "overflow",
                         "shellcode", "rop chain", "heap spray", "buffer overflow"]
     is_exploit_query = cve_match or any(kw in lower for kw in exploit_keywords)
+
+    # Knowledge questions about exploits should NOT route to security bridge
+    if is_exploit_query and _is_knowledge_question:
+        is_exploit_query = False
 
     if is_exploit_query and not edit_mode:
         try:
