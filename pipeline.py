@@ -1522,6 +1522,75 @@ def _exec_reality_check(p: Pipeline, compile_ok: bool, language: str,
     return ok
 
 
+def _generate_test_args(code: str, task: str) -> str:
+    """Analyze code to detect arg count/types and generate matching random test values."""
+    import re as _re
+    import random as _rnd
+
+    # --- Detect argparse usage ---
+    add_args = _re.findall(
+        r'\.add_argument\(\s*["\']([^"\']+)["\']', code)
+    positional = [a for a in add_args if not a.startswith('-')]
+
+    arg_types = {}
+    for match in _re.finditer(
+        r'\.add_argument\(\s*["\']([^"\']+)["\'].*?type\s*=\s*(\w+)', code):
+        arg_name, type_name = match.group(1), match.group(2)
+        if not arg_name.startswith('-'):
+            arg_types[arg_name] = type_name
+
+    arg_choices = {}
+    for match in _re.finditer(
+        r'\.add_argument\(\s*["\']([^"\']+)["\'].*?choices\s*=\s*\[([^\]]+)\]', code):
+        arg_name = match.group(1)
+        choices_str = match.group(2)
+        if not arg_name.startswith('-'):
+            choices = [c.strip().strip('"\'') for c in choices_str.split(',')]
+            arg_choices[arg_name] = choices
+
+    if positional:
+        values = []
+        for arg in positional:
+            if arg in arg_choices:
+                values.append(_rnd.choice(arg_choices[arg]))
+            elif arg in arg_types:
+                t = arg_types[arg]
+                if t in ('int', 'float'):
+                    values.append(str(round(_rnd.uniform(-100, 100), 2) if t == 'float'
+                                     else _rnd.randint(-100, 100)))
+                else:
+                    values.append(f'test_{_rnd.randint(1,999)}')
+            else:
+                task_lower = task.lower()
+                if any(w in task_lower for w in ('float', 'decimal', 'real')):
+                    values.append(str(round(_rnd.uniform(-100, 100), 2)))
+                elif any(w in task_lower for w in ('int', 'integer', 'count', 'index')):
+                    values.append(str(_rnd.randint(1, 100)))
+                else:
+                    values.append(str(round(_rnd.uniform(-50, 50), 2) if len(values) % 2 == 0
+                                     else _rnd.randint(1, 50)))
+        return ' '.join(values)
+
+    # --- Detect sys.argv usage ---
+    argv_refs = _re.findall(r'sys\.argv\[(\d+)\]', code)
+    if argv_refs:
+        max_idx = max(int(i) for i in argv_refs)
+        values = []
+        for i in range(1, max_idx + 1):
+            task_lower = task.lower()
+            if any(w in task_lower for w in ('float', 'decimal', 'real')):
+                values.append(str(round(_rnd.uniform(-100, 100), 2)))
+            elif any(w in task_lower for w in ('int', 'integer', 'count')):
+                values.append(str(_rnd.randint(1, 100)))
+            else:
+                values.append(str(round(_rnd.uniform(-50, 50), 2) if i % 2 == 0
+                                 else _rnd.randint(1, 50)))
+        return ' '.join(values)
+
+    # Fallback: 2 random floats
+    return f'{round(_rnd.uniform(-100, 100), 2)} {round(_rnd.uniform(-100, 100), 2)}'
+
+
 def _exec_run(p: Pipeline, language: str, task: str,
               code: str = "") -> tuple[bool, str, str, str]:
     """Returns (run_ok, run_output, run_stdout, run_stderr)."""
@@ -1589,13 +1658,10 @@ def _exec_run(p: Pipeline, language: str, task: str,
                      "arguments are required" in (stderr + stdout).lower() or
                      "expected" in (stderr + stdout).lower() and "argument" in (stderr + stdout).lower()))
         if _arg_err and not code.lstrip().startswith("#_arg_retried"):
-            # Generate random test values instead of hardcoded ones
-            _rand_vals = ' '.join(
-                str(round(__import__('random').uniform(-100, 100), 2))
-                for _ in range(5))
+            _rand_vals = _generate_test_args(code, task)
             _arg_cmd = _wrap_with_timeout(
                 f'{_run_cmd("python")} /workspace/tmp/pipeline_run.py {_rand_vals}', 15)
-            _send_to_terminal(f'echo "\\n\\033[1;36m[Pipeline] Retrying with random args: {_rand_vals}\\033[0m"')
+            _send_to_terminal(f'echo "\\n\\033[1;36m[Pipeline] Retrying with args: {_rand_vals}\\033[0m"')
             _arg_exit, _arg_out, _arg_err_out = docker_env.exec_command(
                 _arg_cmd, timeout=45, demux=True)
             if _arg_exit == 0:
