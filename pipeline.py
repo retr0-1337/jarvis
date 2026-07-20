@@ -1653,15 +1653,20 @@ def _exec_run(p: Pipeline, language: str, task: str,
 
         # Argument error: code uses sys.argv/argparse but no args provided
         # Retry with test arguments before going to REPAIR_RUNTIME
-        _arg_err = (exit_code == 2 and language == "python" and
-                    ("usage:" in (stderr + stdout).lower() or
-                     "arguments are required" in (stderr + stdout).lower() or
-                     "expected" in (stderr + stdout).lower() and "argument" in (stderr + stdout).lower()))
-        if _arg_err and not code.lstrip().startswith("#_arg_retried"):
+        _combined_err = (stderr + stdout).lower()
+        _arg_err = (exit_code == 2 and "python" in language.lower() and
+                    ("usage:" in _combined_err or
+                     "arguments are required" in _combined_err or
+                     "not recognized" in _combined_err or
+                     ("expected" in _combined_err and "argument" in _combined_err)))
+        if _arg_err and not getattr(p, '_arg_retried', False):
+            p._arg_retried = True
             _rand_vals = _generate_test_args(code, task)
             _arg_cmd = _wrap_with_timeout(
                 f'{_run_cmd("python")} /workspace/tmp/pipeline_run.py {_rand_vals}', 15)
             _send_to_terminal(f'echo "\\n\\033[1;36m[Pipeline] Retrying with args: {_rand_vals}\\033[0m"')
+            print(f"[PIPELINE] ARG_RETRY: lang={language}, exit={exit_code}, "
+                  f"stderr={stderr[:200]}, args={_rand_vals}", file=sys.stderr)
             _arg_exit, _arg_out, _arg_err_out = docker_env.exec_command(
                 _arg_cmd, timeout=45, demux=True)
             if _arg_exit == 0:
