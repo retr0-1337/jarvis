@@ -1577,15 +1577,38 @@ def _generate_test_args(code: str, task: str) -> str:
     if argv_refs:
         max_idx = max(int(i) for i in argv_refs)
         values = []
+        # Detect type hints from code patterns
         for i in range(1, max_idx + 1):
-            task_lower = task.lower()
-            if any(w in task_lower for w in ('float', 'decimal', 'real')):
-                values.append(str(round(_rnd.uniform(-100, 100), 2)))
-            elif any(w in task_lower for w in ('int', 'integer', 'count')):
+            # Check if this arg is used in float()/int() calls
+            uses_float = bool(_re.search(
+                rf'float\s*\(\s*sys\.argv\[{i}\]', code))
+            uses_int = bool(_re.search(
+                rf'int\s*\(\s*sys\.argv\[{i}\]', code))
+            # Check if this arg is compared to string literals (enum/choice)
+            choices_match = _re.findall(
+                rf'(?:==|in\s*\[)\s*["\'](\w+)["\'].*?sys\.argv\[{i}\]|'
+                rf'sys\.argv\[{i}\].*?(?:==|in\s*\[)\s*["\'](\w+)["\']',
+                code)
+            # Also check if/elif chains: `if sys.argv[1] == 'add'`
+            ifelif_choices = _re.findall(
+                rf'(?:if|elif)\s+sys\.argv\[{i}\]\s*==\s*["\'](\w+)["\']',
+                code)
+            all_choices = [c for c in (choices_match + ifelif_choices) if c]
+            if all_choices:
+                values.append(_rnd.choice(all_choices))
+            elif uses_float:
+                values.append(str(round(_rnd.uniform(1, 100), 2)))
+            elif uses_int:
                 values.append(str(_rnd.randint(1, 100)))
             else:
-                values.append(str(round(_rnd.uniform(-50, 50), 2) if i % 2 == 0
-                                 else _rnd.randint(1, 50)))
+                task_lower = task.lower()
+                if any(w in task_lower for w in ('float', 'decimal', 'real')):
+                    values.append(str(round(_rnd.uniform(-100, 100), 2)))
+                elif any(w in task_lower for w in ('int', 'integer', 'count')):
+                    values.append(str(_rnd.randint(1, 100)))
+                else:
+                    values.append(str(round(_rnd.uniform(-50, 50), 2) if i % 2 == 0
+                                     else _rnd.randint(1, 50)))
         return ' '.join(values)
 
     # Fallback: 2 random floats
@@ -1655,11 +1678,12 @@ def _exec_run(p: Pipeline, language: str, task: str,
         # Argument error: code uses sys.argv/argparse but no args provided
         # Retry with test arguments before going to REPAIR_RUNTIME
         _combined_err = (stderr + stdout).lower()
-        _arg_err = (exit_code == 2 and "python" in language.lower() and
-                    ("usage:" in _combined_err or
-                     "arguments are required" in _combined_err or
-                     "not recognized" in _combined_err or
-                     ("expected" in _combined_err and "argument" in _combined_err)))
+        _usage_like = ("usage:" in _combined_err or
+                       "arguments are required" in _combined_err or
+                       "not recognized" in _combined_err or
+                       ("expected" in _combined_err and "argument" in _combined_err))
+        _arg_err = ("python" in language.lower() and
+                    _usage_like and exit_code in (1, 2))
         print(f"[PIPELINE] ARG_CHECK: exit={exit_code}, lang='{language}', "
               f"arg_err={_arg_err}, combined_err_preview={_combined_err[:300]}",
               file=sys.stderr)
