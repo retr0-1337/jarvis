@@ -386,6 +386,68 @@ exec(compile(_code, "{filename}", "exec"))
 '''
 
 
+def _needs_args(code: str) -> bool:
+    """Check if code requires CLI arguments (argparse or sys.argv)."""
+    import re
+    has_argparse = bool(re.search(r'argparse\.ArgumentParser|\.parse_args\(\)', code))
+    has_argv = bool(re.search(r'sys\.argv\[\d+\]', code))
+    return has_argparse or has_argv
+
+
+def _generate_cli_args(code: str) -> str:
+    """Analyze code to detect arg count/types and generate matching random test values."""
+    import re
+    import random as _rnd
+
+    add_args = re.findall(
+        r'\.add_argument\(\s*["\']([^"\']+)["\']', code)
+    positional = [a for a in add_args if not a.startswith('-')]
+
+    arg_types = {}
+    for match in re.finditer(
+        r'\.add_argument\(\s*["\']([^"\']+)["\'].*?type\s*=\s*(\w+)', code):
+        arg_name, type_name = match.group(1), match.group(2)
+        if not arg_name.startswith('-'):
+            arg_types[arg_name] = type_name
+
+    arg_choices = {}
+    for match in re.finditer(
+        r'\.add_argument\(\s*["\']([^"\']+)["\'].*?choices\s*=\s*\[([^\]]+)\]', code):
+        arg_name = match.group(1)
+        choices_str = match.group(2)
+        if not arg_name.startswith('-'):
+            choices = [c.strip().strip('"\'') for c in choices_str.split(',')]
+            arg_choices[arg_name] = choices
+
+    if positional:
+        values = []
+        for arg in positional:
+            if arg in arg_choices:
+                values.append(_rnd.choice(arg_choices[arg]))
+            elif arg in arg_types:
+                t = arg_types[arg]
+                if t in ('int', 'float'):
+                    values.append(str(round(_rnd.uniform(-100, 100), 2) if t == 'float'
+                                     else _rnd.randint(-100, 100)))
+                else:
+                    values.append(f'test_{_rnd.randint(1,999)}')
+            else:
+                values.append(str(round(_rnd.uniform(-50, 50), 2) if len(values) % 2 == 0
+                                 else _rnd.randint(1, 50)))
+        return ' '.join(values)
+
+    argv_refs = re.findall(r'sys\.argv\[(\d+)\]', code)
+    if argv_refs:
+        max_idx = max(int(i) for i in argv_refs)
+        values = []
+        for i in range(1, max_idx + 1):
+            values.append(str(round(_rnd.uniform(-50, 50), 2) if i % 2 == 0
+                             else _rnd.randint(1, 50)))
+        return ' '.join(values)
+
+    return f'{round(_rnd.uniform(-100, 100), 2)} {round(_rnd.uniform(-100, 100), 2)}'
+
+
 def run_code(code, language, filename=None):
     """Write code to a temp file, compile if needed, run it.
     Returns (exit_code, stdout, stderr) where stderr contains compiler warnings."""
@@ -442,6 +504,10 @@ def run_code(code, language, filename=None):
         wrapper = _build_input_wrapper(code, values, filename)
         write_file("/workspace/tmp/_input_wrapper.py", wrapper)
         run_cmd = f"cd /workspace && python3 tmp/_input_wrapper.py"
+    elif lang in ("python", "python3") and _needs_args(code):
+        # Code uses argparse or sys.argv — provide test arguments
+        args = _generate_cli_args(code)
+        run_cmd = f"cd /workspace && python3 {filename} {args}"
     else:
         run_cmd = run_cmds[lang]
 
