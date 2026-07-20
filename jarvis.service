@@ -1,0 +1,22 @@
+[Unit]
+Description=Jarvis AI Assistant
+After=network.target graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+# Auto-detect user's home directory
+WorkingDirectory=%h/Jarvis
+ExecStart=%h/Jarvis/venv/bin/python %h/Jarvis/start_jarvis.sh
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=process
+
+# Environment (override as needed)
+Environment=JARVIS_PI_HOST=192.168.0.111
+Environment=JARVIS_PI_USER=pi
+
+[Install]
+WantedBy=default.target

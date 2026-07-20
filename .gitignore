@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Runtime files (IPC, logs, transcripts)
+transcript.txt
+transcript.log
+conversation.log
+response.txt
+voice_command.txt
+.command_ready
+.jarvis_running
+wav
+*.log
+*.swp
+*.swo
+*~
+
+# Workspace (compiled binaries, temp files)
+workspace/tmp/
+workspace/*.bin
+workspace/*.o
+workspace/*.exe
+workspace/*.test
+workspace/user_details.json
+workspace/.empty_input.txt.swp
+
+# Security PoC files
+security_db/*.bin
+security_db/*.mp4
+
+# Config (user-specific, generated at runtime)
+config.json
+
+# Ollama models (large, downloaded separately)
+models/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+versions/

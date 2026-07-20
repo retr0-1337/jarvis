@@ -1,0 +1,278 @@
+{
+  "router_cves": [
+    {
+      "vendor": "asus",
+      "models": ["rt-ac51", "rt-ac51u", "dsl-ac51"],
+      "cpe": "cpe:2.3:h:asus:rt-ac51u:*",
+      "cves": [
+        {
+          "id": "CVE-2024-3912",
+          "severity": "critical",
+          "cvss": 9.8,
+          "type": "remote_code_execution",
+          "title": "Unauthenticated RCE via firmware upload",
+          "description": "Unauthenticated remote attackers can execute arbitrary system commands by exploiting a vulnerability in how the device handles firmware uploads.",
+          "affected_firmware": "*",
+          "fixed_in": "Check ASUS advisory",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": ["https://www.asus.com/support/"],
+          "testing_method": "Check firmware upload endpoint at /Upgrade.php"
+        },
+        {
+          "id": "CVE-2023-31889",
+          "severity": "high",
+          "cvss": 7.5,
+          "type": "denial_of_service",
+          "title": "DoS via crafted HTTP GET request",
+          "description": "Local attacker can crash the router's web server (httpd) by sending a specially crafted HTTP GET request.",
+          "affected_firmware": "<= 3.0.0.4.380.8591",
+          "fixed_in": "3.0.0.4.380.8592",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": [],
+          "testing_method": "Send oversized HTTP GET request to crash httpd"
+        },
+        {
+          "id": "CVE-2023-33548",
+          "severity": "medium",
+          "cvss": 6.1,
+          "type": "xss",
+          "title": "Cross-Site Scripting in web management",
+          "description": "XSS vulnerability in web management interface allows script injection.",
+          "affected_firmware": "*",
+          "fixed_in": "Check ASUS advisory",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": [],
+          "testing_method": "Inject script in parameter fields and check if executed"
+        },
+        {
+          "id": "CVE-2020-25681",
+          "severity": "critical",
+          "cvss": 9.8,
+          "type": "dns_rebinding",
+          "title": "DNSpooq - dnsmasq DNS cache poisoning",
+          "description": "Set of flaws in dnsmasq allowing cache poisoning, spoofing, or RCE.",
+          "affected_firmware": "< 9.0.0.4.382.70610",
+          "fixed_in": "9.0.0.4.382.70610",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": ["https://www.badsecdns.xyz/"],
+          "testing_method": "DNS rebinding attack on dnsmasq"
+        },
+        {
+          "id": "CVE-2020-25682",
+          "severity": "critical",
+          "cvss": 9.8,
+          "type": "buffer_overflow",
+          "title": "DNSpooq - dnsmasq buffer overflow",
+          "description": "Buffer overflow in dnsmasq DNS response handling.",
+          "affected_firmware": "< 9.0.0.4.382.70610",
+          "fixed_in": "9.0.0.4.382.70610",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": [],
+          "testing_method": "Send crafted DNS response to trigger overflow"
+        },
+        {
+          "id": "CVE-2020-25683",
+          "severity": "high",
+          "cvss": 7.5,
+          "type": "denial_of_service",
+          "title": "DNSpooq - dnsmasq DoS",
+          "description": "Denial of service in dnsmasq via crafted DNS packets.",
+          "affected_firmware": "< 9.0.0.4.382.70610",
+          "fixed_in": "9.0.0.4.382.70610",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": [],
+          "testing_method": "Send malformed DNS packets to crash dnsmasq"
+        },
+        {
+          "id": "CVE-2020-25684",
+          "severity": "high",
+          "cvss": 7.5,
+          "type": "dns_rebinding",
+          "title": "DNSpooq - dnsmasq DNS response spoofing",
+          "description": "DNS response spoofing vulnerability in dnsmasq.",
+          "affected_firmware": "< 9.0.0.4.382.70610",
+          "fixed_in": "9.0.0.4.382.70610",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": [],
+          "testing_method": "DNS spoofing attack"
+        },
+        {
+          "id": "CVE-2020-25685",
+          "severity": "high",
+          "cvss": 7.5,
+          "type": "dns_rebinding",
+          "title": "DNSpooq - dnsmasq DNS cache poisoning",
+          "description": "DNS cache poisoning via dnsmasq.",
+          "affected_firmware": "< 9.0.0.4.382.70610",
+          "fixed_in": "9.0.0.4.382.70610",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": [],
+          "testing_method": "DNS cache poisoning test"
+        },
+        {
+          "id": "CVE-2020-25686",
+          "severity": "high",
+          "cvss": 7.5,
+          "type": "denial_of_service",
+          "title": "DNSpooq - dnsmasq DoS via TCP",
+          "description": "Denial of service via TCP DNS in dnsmasq.",
+          "affected_firmware": "< 9.0.0.4.382.70610",
+          "fixed_in": "9.0.0.4.382.70610",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": [],
+          "testing_method": "TCP DNS flood"
+        },
+        {
+          "id": "CVE-2020-25687",
+          "severity": "critical",
+          "cvss": 9.8,
+          "type": "buffer_overflow",
+          "title": "DNSpooq - dnsmasq heap overflow",
+          "description": "Heap buffer overflow in dnsmasq DNS response handling.",
+          "affected_firmware": "< 9.0.0.4.382.70610",
+          "fixed_in": "9.0.0.4.382.70610",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": [],
+          "testing_method": "Heap overflow via crafted DNS response"
+        },
+        {
+          "id": "CVE-2025-59367",
+          "severity": "critical",
+          "cvss": 9.8,
+          "type": "authentication_bypass",
+          "title": "Authentication Bypass on DSL-AC51",
+          "description": "Remote network attackers can completely bypass login screens and gain full administrative access without credentials.",
+          "affected_firmware": "*",
+          "fixed_in": "Check ASUS advisory",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": [],
+          "testing_method": "Access admin pages without authentication"
+        }
+      ]
+    },
+    {
+      "vendor": "asus",
+      "models": ["rt-ac68u", "rt-ac68p", "rt-ac86u", "rt-ac88u", "rt-ac3100", "rt-ac5300"],
+      "cpe": "cpe:2.3:h:asus:rt-ac68u:*",
+      "cves": [
+        {
+          "id": "CVE-2018-14708",
+          "severity": "critical",
+          "cvss": 9.8,
+          "type": "remote_code_execution",
+          "title": "Stack buffer overflow in httpd",
+          "description": "Stack buffer overflow allows unauthenticated RCE.",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": []
+        },
+        {
+          "id": "CVE-2018-14709",
+          "severity": "critical",
+          "cvss": 9.8,
+          "type": "remote_code_execution",
+          "title": "Command injection in httpd",
+          "description": "Command injection via crafted HTTP request.",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": []
+        },
+        {
+          "id": "CVE-2018-14710",
+          "severity": "high",
+          "cvss": 7.5,
+          "type": "information_disclosure",
+          "title": "Information disclosure via httpd",
+          "description": "HTTP server leaks sensitive information.",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": []
+        },
+        {
+          "id": "CVE-2020-25681",
+          "severity": "critical",
+          "cvss": 9.8,
+          "type": "dns_rebinding",
+          "title": "DNSpooq - dnsmasq DNS cache poisoning",
+          "description": "Set of flaws in dnsmasq allowing cache poisoning, spoofing, or RCE.",
+          "affected_firmware": "< 9.0.0.4.382.70610",
+          "fixed_in": "9.0.0.4.382.70610",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": ["https://www.badsecdns.xyz/"]
+        }
+      ]
+    },
+    {
+      "vendor": "asus",
+      "models": ["rt-n66u", "rt-n56u", "rt-ac56u", "rt-ac52u", "rt-ac51u"],
+      "cpe": "cpe:2.3:h:asus:rt-ac56u:*",
+      "cves": [
+        {
+          "id": "CVE-2022-23176",
+          "severity": "high",
+          "cvss": 7.2,
+          "type": "command_injection",
+          "title": "Command injection in Asuswrt-BNDMON",
+          "description": "Command injection allows unauthenticated root shell via HTTP request.",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": ["https://github.com/dirkmueller/CVE-2022-23176"]
+        },
+        {
+          "id": "CVE-2018-14708",
+          "severity": "critical",
+          "cvss": 9.8,
+          "type": "remote_code_execution",
+          "title": "Stack buffer overflow in httpd",
+          "description": "Stack buffer overflow in httpd allows RCE.",
+          "has_metasploit": false,
+          "exploit_available": true,
+          "references": []
+        }
+      ]
+    },
+    {
+      "vendor": "asus",
+      "models": ["all"],
+      "cpe": "cpe:2.3:o:asus:asuswrt:*",
+      "cves": [
+        {
+          "id": "CVE-2018-5999",
+          "severity": "critical",
+          "cvss": 9.8,
+          "type": "remote_code_execution",
+          "title": "AsusWRT LAN RCE",
+          "description": "HTTP server allows unauthenticated POST in certain cases, combined with VPN config injection for RCE.",
+          "has_metasploit": true,
+          "metasploit_module": "exploits/linux/http/asuswrt_lan_rce",
+          "exploit_available": true,
+          "references": []
+        },
+        {
+          "id": "CVE-2014-9583",
+          "severity": "critical",
+          "cvss": 9.8,
+          "type": "authentication_bypass",
+          "title": "infosvr auth bypass exec",
+          "description": "Authentication bypass in infosvr service on UDP 9999 allows arbitrary command execution as root.",
+          "has_metasploit": true,
+          "metasploit_module": "exploits/linux/misc/asus_infosvr_auth_bypass_exec",
+          "exploit_available": true,
+          "references": []
+        }
+      ]
+    }
+  ]
+}

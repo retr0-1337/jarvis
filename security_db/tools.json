@@ -1,0 +1,239 @@
+{
+  "tools": {
+    "nmap": {
+      "name": "Nmap",
+      "description": "Network exploration and security auditing tool",
+      "category": "recon",
+      "install_check": "nmap --version",
+      "commands": {
+        "scan": "nmap -Pn -T4 -sV -sC {target}",
+        "quick_scan": "nmap -Pn -T4 -F {target}",
+        "full_scan": "nmap -Pn -T4 -A -p- {target}",
+        "service_version": "nmap -Pn -sV -sC {target}",
+        "os_detect": "nmap -Pn -O {target}",
+        "udp_scan": "nmap -Pn -sU --top-ports 100 {target}",
+        "vuln_scan": "nmap -Pn --script vuln {target}",
+        "all_scripts": "nmap -Pn --script=default {target}",
+        "stealth_scan": "nmap -Pn -sS -T2 {target}",
+        "ping_sweep": "nmap -sn {target}",
+        "port_range": "nmap -Pn -p {ports} {target}",
+        "output_xml": "nmap -Pn -oX {output} {target}",
+        "aggressive": "nmap -Pn -A -T4 {target}",
+        "scripts_auth": "nmap -Pn --script auth {target}",
+        "scripts_brute": "nmap -Pn --script brute {target}",
+        "scripts_exploit": "nmap -Pn --script exploit {target}"
+      },
+      "flags": {
+        "-sS": "TCP SYN scan (stealth)",
+        "-sT": "TCP connect scan",
+        "-sV": "Service version detection",
+        "-sC": "Default scripts",
+        "-O": "OS detection",
+        "-A": "Aggressive scan (OS, version, scripts, traceroute)",
+        "-p-": "Scan all 65535 ports",
+        "-p": "Specify ports (e.g., -p 80,443 or -p 1-1000)",
+        "-T0": "Paranoid timing",
+        "-T1": "Sneaky timing",
+        "-T2": "Polite timing",
+        "-T3": "Normal timing",
+        "-T4": "Aggressive timing",
+        "-T5": "Insane timing",
+        "-sn": "Ping scan only (no port scan)",
+        "-Pn": "Skip host discovery",
+        "-oX": "Output XML",
+        "-oN": "Output normal",
+        "-oG": "Output grepable",
+        "--script": "Run NSE scripts",
+        "-U": "UDP scan",
+        "-sU": "UDP scan"
+      },
+      "help_command": "nmap --help"
+    },
+    "msfconsole": {
+      "name": "Metasploit Framework",
+      "description": "Penetration testing framework for exploit development and payload delivery",
+      "category": "exploit",
+      "install_check": "msfconsole --version",
+      "commands": {
+        "search_cve": "msfconsole -q -x 'search cve:{cve}; exit'",
+        "search_type": "msfconsole -q -x 'search type:exploit {keyword}; exit'",
+        "search_platform": "msfconsole -q -x 'search platform:{platform}; exit'",
+        "use_exploit": "msfconsole -q -x 'use {module}; show options; exit'",
+        "run_exploit": "msfconsole -q -x 'use {module}; set RHOSTS {rhosts}; run; exit'",
+        "run_module": "msfconsole -q -x 'use {module}; set RHOSTS {target}; run; exit'",
+        "list_exploits": "msfconsole -q -x 'show exploits; exit'",
+        "list_payloads": "msfconsole -q -x 'show payloads; exit'",
+        "info_module": "msfconsole -q -x 'info {module}; exit'",
+        "search_keyword": "msfconsole -q -x 'search {keyword}; exit'"
+      },
+      "flags": {
+        "-q": "Quiet mode",
+        "-x": "Execute commands",
+        "-r": "Resource file"
+      },
+      "help_command": "msfconsole -h"
+    },
+    "sqlmap": {
+      "name": "SQLMap",
+      "description": "Automatic SQL injection and database takeover tool",
+      "category": "exploit",
+      "install_check": "sqlmap --version",
+      "commands": {
+        "basic_test": "sqlmap -u '{url}' --batch",
+        "full_enumeration": "sqlmap -u '{url}' --batch --dbs --tables --dump-all",
+        "test_cookie": "sqlmap -u '{url}' --cookie='{cookie}' --batch",
+        "test_post": "sqlmap -u '{url}' --data='{data}' --batch",
+        "test_headers": "sqlmap -u '{url}' --headers='{headers}' --batch",
+        "risk_level": "sqlmap -u '{url}' --risk=3 --level=5 --batch",
+        "bypass_waf": "sqlmap -u '{url}' --random-agent --tamper=space2comment --batch",
+        "os_shell": "sqlmap -u '{url}' --os-shell --batch",
+        "file_read": "sqlmap -u '{url}' --file-read='{file}' --batch",
+        "batch_all": "sqlmap -u '{url}' --batch --forms --crawl=3"
+      },
+      "flags": {
+        "-u": "Target URL",
+        "--data": "POST data",
+        "--cookie": "HTTP cookie",
+        "--batch": "Non-interactive mode",
+        "--dbs": "Enumerate databases",
+        "--tables": "Enumerate tables",
+        "--dump-all": "Dump all data",
+        "--os-shell": "Get OS shell",
+        "--file-read": "Read file on server",
+        "--risk": "Risk level (1-3)",
+        "--level": "Level of tests (1-5)",
+        "--random-agent": "Random User-Agent",
+        "--tamper": "Bypass filter",
+        "--forms": "Parse forms",
+        "--crawl": "Crawl website"
+      },
+      "help_command": "sqlmap -h"
+    },
+    "hydra": {
+      "name": "THC Hydra",
+      "description": "Network logon cracker supporting many protocols",
+      "category": "brute",
+      "install_check": "hydra -h 2>&1 | head -1",
+      "commands": {
+        "ssh_brute": "hydra -l {user} -P {wordlist} {target} ssh",
+        "ftp_brute": "hydra -l {user} -P {wordlist} {target} ftp",
+        "http_brute": "hydra -l {user} -P {wordlist} {target} http-get {path}",
+        "http_post": "hydra -l {user} -P {wordlist} {target} http-post-form '{path}:{data}:F={fail}'",
+        "mysql_brute": "hydra -l {user} -P {wordlist} {target} mysql",
+        "rdp_brute": "hydra -l {user} -P {wordlist} {target} rdp",
+        "smb_brute": "hydra -l {user} -P {wordlist} {target} smb",
+        "telnet_brute": "hydra -l {user} -P {wordlist} {target} telnet",
+        "list_modules": "hydra -h 2>&1 | grep -A 50 'Supported services'"
+      },
+      "flags": {
+        "-l": "Login username",
+        "-L": "Username list",
+        "-p": "Password",
+        "-P": "Password list",
+        "-t": "Number of threads",
+        "-v": "Verbose mode",
+        "-V": "Show each attempt",
+        "-f": "Stop on first found",
+        "-s": "Custom port"
+      },
+      "help_command": "hydra -h"
+    },
+    "nikto": {
+      "name": "Nikto",
+      "description": "Web server scanner for vulnerabilities and misconfigurations",
+      "category": "recon",
+      "install_check": "nikto -Version 2>&1 | head -1",
+      "commands": {
+        "basic_scan": "nikto -h {target}",
+        "full_scan": "nikto -h {target} -Tuning 1234567890abc",
+        "port_scan": "nikto -h {target} -p {port}",
+        "ssl_scan": "nikto -h {target} -ssl",
+        "evasion": "nikto -h {target} -evasion 1",
+        "output_xml": "nikto -h {target} -o {output} -Format xml"
+      },
+      "flags": {
+        "-h": "Target host",
+        "-p": "Target port",
+        "-ssl": "Force SSL",
+        "-Tuning": "Test categories (0-9,a-c)",
+        "-evasion": "Evasion technique",
+        "-o": "Output file",
+        "-Format": "Output format"
+      },
+      "help_command": "nikto -h"
+    },
+    "john": {
+      "name": "John the Ripper",
+      "description": "Password cracker",
+      "category": "brute",
+      "install_check": "john --version 2>&1 | head -1",
+      "commands": {
+        "crack_hash": "john --wordlist={wordlist} {hashfile}",
+        "crack_all": "john --show {hashfile}",
+        "format_hash": "john --format={format} --wordlist={wordlist} {hashfile}",
+        "list_formats": "john --list=formats",
+        "list_wordlists": "john --list=wordlists",
+        "unshadow": "unshadow /etc/passwd /etc/shadow > unshadowed.txt"
+      },
+      "flags": {
+        "--wordlist": "Wordlist file",
+        "--format": "Hash format",
+        "--show": "Show cracked passwords",
+        "--list": "List options"
+      },
+      "help_command": "john --help"
+    },
+    "netcat": {
+      "name": "Netcat",
+      "description": "Networking utility for reading/writing across network connections",
+      "category": "utility",
+      "install_check": "nc -h 2>&1 | head -1",
+      "commands": {
+        "listen": "nc -lvnp {port}",
+        "connect": "nc {target} {port}",
+        "udp_listen": "nc -luvn {port}",
+        "udp_connect": "nc -u {target} {port}",
+        "file_transfer": "nc -lvnp {port} > {filename}",
+        "port_scan": "nc -zv {target} {port_start}-{port_end}",
+        "banner_grab": "nc -v {target} {port}"
+      },
+      "flags": {
+        "-l": "Listen mode",
+        "-v": "Verbose",
+        "-n": "No DNS resolution",
+        "-p": "Port number",
+        "-u": "UDP mode",
+        "-z": "Zero-I/O mode (scanning)"
+      },
+      "help_command": "nc -h"
+    }
+  },
+  "workflows": {
+    "full_pentest": {
+      "description": "Complete penetration testing workflow",
+      "steps": [
+        {"tool": "nmap", "purpose": "Host discovery and port scanning", "command": "nmap -sn {target}"},
+        {"tool": "nmap", "purpose": "Service enumeration", "command": "nmap -sV -sC -p- {target}"},
+        {"tool": "nikto", "purpose": "Web vulnerability scanning", "command": "nikto -h {target}"},
+        {"tool": "sqlmap", "purpose": "SQL injection testing", "command": "sqlmap -u '{target_url}' --batch"},
+        {"tool": "hydra", "purpose": "Brute force login", "command": "hydra -l {user} -P {wordlist} {target} {service}"}
+      ]
+    },
+    "web_app_test": {
+      "description": "Web application security testing",
+      "steps": [
+        {"tool": "nmap", "purpose": "Port scan", "command": "nmap -sV -p 80,443,8080 {target}"},
+        {"tool": "nikto", "purpose": "Web vulnerability scan", "command": "nikto -h {target}"},
+        {"tool": "sqlmap", "purpose": "SQL injection", "command": "sqlmap -u '{target_url}' --batch --forms"}
+      ]
+    },
+    "network_audit": {
+      "description": "Network security audit",
+      "steps": [
+        {"tool": "nmap", "purpose": "Network discovery", "command": "nmap -sn {network}"},
+        {"tool": "nmap", "purpose": "Service detection", "command": "nmap -sV -sC {network}"},
+        {"tool": "nmap", "purpose": "Vulnerability scan", "command": "nmap --script vuln {network}"}
+      ]
+    }
+  }
+}

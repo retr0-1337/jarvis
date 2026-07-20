@@ -1,0 +1,19 @@
+# Core AI / Voice
+faster-whisper
+edge-tts
+speechrecognition
+webrtcvad
+numpy
+
+# LLM
+ollama
+
+# Docker (for pentest sandbox)
+docker
+
+# WebSocket terminal
+websockets
+
+# RAG / embeddings (optional, for code indexing)
+# sentence-transformers
+# faiss-cpu
