@@ -1579,26 +1579,44 @@ def _generate_test_args(code: str, task: str) -> str:
         values = []
         # Detect type hints from code patterns
         for i in range(1, max_idx + 1):
-            # Check if this arg is used in float()/int() calls
+            # Direct float/int casts: float(sys.argv[2])
             uses_float = bool(_re.search(
                 rf'float\s*\(\s*sys\.argv\[{i}\]', code))
             uses_int = bool(_re.search(
                 rf'int\s*\(\s*sys\.argv\[{i}\]', code))
-            # Check if this arg is compared to string literals (enum/choice)
-            choices_match = _re.findall(
-                rf'(?:==|in\s*\[)\s*["\'](\w+)["\'].*?sys\.argv\[{i}\]|'
-                rf'sys\.argv\[{i}\].*?(?:==|in\s*\[)\s*["\'](\w+)["\']',
-                code)
-            # Also check if/elif chains: `if sys.argv[1] == 'add'`
-            ifelif_choices = _re.findall(
-                rf'(?:if|elif)\s+sys\.argv\[{i}\]\s*==\s*["\'](\w+)["\']',
-                code)
-            all_choices = [c for c in (choices_match + ifelif_choices) if c]
+
+            # Find variable assigned from this argv: operation = sys.argv[1]
+            var_match = _re.search(
+                rf'(\w+)\s*=\s*sys\.argv\[{i}\]', code)
+            var_name = var_match.group(1) if var_match else None
+
+            # Look for if/elif choices — both direct and via variable
+            all_choices = []
+            if var_name:
+                # if operation == "add" / elif operation == "subtract"
+                all_choices = _re.findall(
+                    rf'(?:if|elif)\s+{var_name}\s*==\s*["\'](\w+)["\']',
+                    code)
+            # Direct: if sys.argv[1] == "add"
+            if not all_choices:
+                all_choices = _re.findall(
+                    rf'(?:if|elif)\s+sys\.argv\[{i}\]\s*==\s*["\'](\w+)["\']',
+                    code)
+            # Also check `in [...]` patterns
+            if not all_choices and var_name:
+                in_match = _re.search(
+                    rf'{var_name}\s+in\s*\[([^\]]+)\]', code)
+                if in_match:
+                    all_choices = [c.strip().strip('"\'')
+                                   for c in in_match.group(1).split(',')]
+
             if all_choices:
                 values.append(_rnd.choice(all_choices))
-            elif uses_float:
+            elif uses_float or (var_name and _re.search(
+                    rf'float\s*\(\s*{var_name}\b', code)):
                 values.append(str(round(_rnd.uniform(1, 100), 2)))
-            elif uses_int:
+            elif uses_int or (var_name and _re.search(
+                    rf'int\s*\(\s*{var_name}\b', code)):
                 values.append(str(_rnd.randint(1, 100)))
             else:
                 task_lower = task.lower()

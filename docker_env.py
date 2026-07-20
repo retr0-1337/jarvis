@@ -441,8 +441,39 @@ def _generate_cli_args(code: str) -> str:
         max_idx = max(int(i) for i in argv_refs)
         values = []
         for i in range(1, max_idx + 1):
-            values.append(str(round(_rnd.uniform(-50, 50), 2) if i % 2 == 0
-                             else _rnd.randint(1, 50)))
+            # Direct float/int casts
+            uses_float = bool(re.search(rf'float\s*\(\s*sys\.argv\[{i}\]', code))
+            uses_int = bool(re.search(rf'int\s*\(\s*sys\.argv\[{i}\]', code))
+
+            # Find variable assigned from this argv
+            var_match = re.search(rf'(\w+)\s*=\s*sys\.argv\[{i}\]', code)
+            var_name = var_match.group(1) if var_match else None
+
+            # Look for if/elif choices via variable
+            all_choices = []
+            if var_name:
+                all_choices = re.findall(
+                    rf'(?:if|elif)\s+{var_name}\s*==\s*["\'](\w+)["\']', code)
+            if not all_choices:
+                all_choices = re.findall(
+                    rf'(?:if|elif)\s+sys\.argv\[{i}\]\s*==\s*["\'](\w+)["\']', code)
+            if not all_choices and var_name:
+                in_match = re.search(rf'{var_name}\s+in\s*\[([^\]]+)\]', code)
+                if in_match:
+                    all_choices = [c.strip().strip('"\'')
+                                   for c in in_match.group(1).split(',')]
+
+            if all_choices:
+                values.append(_rnd.choice(all_choices))
+            elif uses_float or (var_name and re.search(
+                    rf'float\s*\(\s*{var_name}\b', code)):
+                values.append(str(round(_rnd.uniform(1, 100), 2)))
+            elif uses_int or (var_name and re.search(
+                    rf'int\s*\(\s*{var_name}\b', code)):
+                values.append(str(_rnd.randint(1, 100)))
+            else:
+                values.append(str(round(_rnd.uniform(-50, 50), 2) if i % 2 == 0
+                                 else _rnd.randint(1, 50)))
         return ' '.join(values)
 
     return f'{round(_rnd.uniform(-100, 100), 2)} {round(_rnd.uniform(-100, 100), 2)}'
