@@ -1597,18 +1597,35 @@ def _generate_test_args(code: str, task: str) -> str:
                 all_choices = _re.findall(
                     rf'(?:if|elif)\s+{var_name}\s*==\s*["\'](\w+)["\']',
                     code)
+                # Also reversed: "add" == operation
+                all_choices += _re.findall(
+                    rf'["\'](\w+)["\']\s*==\s*{var_name}',
+                    code)
             # Direct: if sys.argv[1] == "add"
             if not all_choices:
                 all_choices = _re.findall(
                     rf'(?:if|elif)\s+sys\.argv\[{i}\]\s*==\s*["\'](\w+)["\']',
                     code)
-            # Also check `in [...]` patterns
+            # `in [...]` patterns: var in ['add', 'sub'] or var not in [...]
             if not all_choices and var_name:
                 in_match = _re.search(
-                    rf'{var_name}\s+in\s*\[([^\]]+)\]', code)
+                    rf'{var_name}\s+(?:not\s+)?in\s*\[([^\]]+)\]', code)
                 if in_match:
                     all_choices = [c.strip().strip('"\'')
                                    for c in in_match.group(1).split(',')]
+            # Dict dispatch: ops = {'add': ..., 'sub': ...} accessed via dict[var]
+            if not all_choices and var_name:
+                # Find dicts that are accessed with this variable: ops[operation]
+                dict_access = _re.findall(
+                    rf'(\w+)\s*\[\s*{var_name}\s*\]', code)
+                for dict_name in dict_access:
+                    dict_def = _re.search(
+                        rf'{dict_name}\s*=\s*\{{([^}}]+)\}}', code)
+                    if dict_def:
+                        all_choices = _re.findall(
+                            r'["\'](\w+)["\']\s*:', dict_def.group(1))
+                        if all_choices:
+                            break
 
             if all_choices:
                 values.append(_rnd.choice(all_choices))
@@ -1699,6 +1716,8 @@ def _exec_run(p: Pipeline, language: str, task: str,
         _usage_like = ("usage:" in _combined_err or
                        "arguments are required" in _combined_err or
                        "not recognized" in _combined_err or
+                       "invalid operation" in _combined_err or
+                       "invalid" in _combined_err and "argument" in _combined_err or
                        ("expected" in _combined_err and "argument" in _combined_err))
         _arg_err = ("python" in language.lower() and
                     _usage_like and exit_code in (1, 2))

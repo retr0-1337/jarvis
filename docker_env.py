@@ -454,14 +454,30 @@ def _generate_cli_args(code: str) -> str:
             if var_name:
                 all_choices = re.findall(
                     rf'(?:if|elif)\s+{var_name}\s*==\s*["\'](\w+)["\']', code)
+                all_choices += re.findall(
+                    rf'["\'](\w+)["\']\s*==\s*{var_name}', code)
             if not all_choices:
                 all_choices = re.findall(
                     rf'(?:if|elif)\s+sys\.argv\[{i}\]\s*==\s*["\'](\w+)["\']', code)
+            # in [...] patterns
             if not all_choices and var_name:
-                in_match = re.search(rf'{var_name}\s+in\s*\[([^\]]+)\]', code)
+                in_match = re.search(
+                    rf'{var_name}\s+(?:not\s+)?in\s*\[([^\]]+)\]', code)
                 if in_match:
                     all_choices = [c.strip().strip('"\'')
                                    for c in in_match.group(1).split(',')]
+            # Dict dispatch: ops = {'add': ..., 'sub': ...} accessed via dict[var]
+            if not all_choices and var_name:
+                dict_access = re.findall(
+                    rf'(\w+)\s*\[\s*{var_name}\s*\]', code)
+                for dict_name in dict_access:
+                    dict_def = re.search(
+                        rf'{dict_name}\s*=\s*\{{([^}}]+)\}}', code)
+                    if dict_def:
+                        all_choices = re.findall(
+                            r'["\'](\w+)["\']\s*:', dict_def.group(1))
+                        if all_choices:
+                            break
 
             if all_choices:
                 values.append(_rnd.choice(all_choices))
