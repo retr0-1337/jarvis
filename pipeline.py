@@ -1828,8 +1828,6 @@ def _exec_generate_tests(p: Pipeline, language: str, code: str, task: str,
     """Generate test file for the code. Returns (ok, test_code, test_file)."""
     p.start_node("GENERATE_TESTS")
     needs_compile = language.lower() in COMPILED_LANGS
-    is_library = "import" in code and ("def " in code or "class " in code)
-    is_standalone = "if __name__" in code or "int main" in code or "def main" in code
 
     # Build task-aware test prompt
     if needs_compile:
@@ -1840,21 +1838,15 @@ def _exec_generate_tests(p: Pipeline, language: str, code: str, task: str,
             "Use assert() and printf(\"PASS\\n\") on success, fprintf(stderr,...) on failure. "
             "Compile independently with gcc -Wall -Wextra -Werror."
         )
-    elif is_library:
-        test_type = "unittest"
-        rules = (
-            "Write a Python unittest test file that imports the module, "
-            "tests each public function/class with known inputs and expected outputs. "
-            "Use self.assertEqual, self.assertTrue, etc. "
-            "Run with: python3 -m unittest test_pipeline -v"
-        )
     else:
+        # Always use subprocess — the code file is always named pipeline_run.py
         test_type = "subprocess"
         rules = (
-            "Write a Python test that uses subprocess to run the script with "
+            "Write a Python test that uses subprocess to run tmp/pipeline_run.py with "
             "sample arguments, captures stdout/stderr, and asserts expected output. "
             "Use sys.exit(1) on failure, print(\"PASS\") on success. "
-            "Test edge cases: empty input, valid input, invalid input."
+            "Test edge cases: empty input, valid input, invalid input. "
+            "Do NOT import from the module directly — always use subprocess.run()."
         )
 
     test_prompt = (
