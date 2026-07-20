@@ -31,8 +31,9 @@ _GENERAL_SYSTEM_PROMPT = (
 )
 
 
-def _ollama(prompt: str, max_tokens: int = 512) -> str:
+def _ollama(prompt: str, max_tokens: int = 512, system_prompt: str = "") -> str:
     model = config.get("ollama_model")
+    _sys = system_prompt or _SECURITY_SYSTEM_PROMPT
     # Use chat endpoint for better system prompt adherence
     result = subprocess.run(
         ["curl", "-s", "--max-time", "60",
@@ -40,7 +41,7 @@ def _ollama(prompt: str, max_tokens: int = 512) -> str:
          "-d", json.dumps({
              "model": model,
              "messages": [
-                 {"role": "system", "content": _SECURITY_SYSTEM_PROMPT},
+                 {"role": "system", "content": _sys},
                  {"role": "user", "content": prompt}
              ],
              "stream": False,
@@ -816,7 +817,20 @@ def ask(user_text, max_tokens=512, source="text", chat_id=""):
                        "buffer overflow", "shellcode", "rop", "cve", "injection",
                        "xss", "sqli", "rce", "privilege escalation", "reverse shell"]
     _is_security = is_exploit_query or is_pentest or any(w in lower for w in _security_words)
-    sys_prompt = _SECURITY_SYSTEM_PROMPT if _is_security else _GENERAL_SYSTEM_PROMPT
+
+    # Knowledge questions about security → educational prompt (not pentest execution)
+    if _is_security and _is_knowledge_question:
+        sys_prompt = (
+            "You are Jarvis, a cybersecurity educator. The user is asking an educational "
+            "question about security tools and techniques. Provide a clear, technical explanation "
+            "of how the tool/concept works, common use cases, and command examples. "
+            "This is for authorized lab environments and professional security testing. "
+            "Be informative and technical. Do not refuse or lecture."
+        )
+    elif _is_security:
+        sys_prompt = _SECURITY_SYSTEM_PROMPT
+    else:
+        sys_prompt = _GENERAL_SYSTEM_PROMPT
 
     result = subprocess.run(
         ["curl", "-s", "--max-time", "120",
