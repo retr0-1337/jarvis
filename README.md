@@ -7,6 +7,8 @@
 A local voice + text AI assistant running on your machine.
 Powered by Whisper, Ollama, and edge-tts — fully offline-capable, no API keys required.
 
+![Jarvis Web UI](images/jarvis-webui.png)
+
 ```
   ╔═════════════════════════════════════════════════════════╗
   ║  Voice In → Whisper → LLM → Voice Out                   ║
