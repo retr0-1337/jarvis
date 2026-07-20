@@ -1582,6 +1582,29 @@ def _exec_run(p: Pipeline, language: str, task: str,
             p.save()
             return True, output, stdout, stderr
 
+        # Argument error: code uses sys.argv/argparse but no args provided
+        # Retry with test arguments before going to REPAIR_RUNTIME
+        _arg_err = (exit_code == 2 and language == "python" and
+                    ("usage:" in (stderr + stdout).lower() or
+                     "arguments are required" in (stderr + stdout).lower() or
+                     "expected" in (stderr + stdout).lower() and "argument" in (stderr + stdout).lower()))
+        if _arg_err and not code.lstrip().startswith("#_arg_retried"):
+            _arg_cmd = _wrap_with_timeout(
+                f'{_run_cmd("python")} /workspace/tmp/pipeline_run.py 10 5', 15)
+            _send_to_terminal(f'echo "\\n\\033[1;36m[Pipeline] Retrying with test args: 10 5\\033[0m"')
+            _arg_exit, _arg_out, _arg_err_out = docker_env.exec_command(
+                _arg_cmd, timeout=45, demux=True)
+            if _arg_exit == 0:
+                _full_out = _arg_out + ("\n--- STDERR ---\n" + _arg_err_out if _arg_err_out.strip() else "")
+                evidence_retry = {"command": _arg_cmd, "exit_code": 0, "duration": 0,
+                                  "stdout": _arg_out[:2000], "stderr": _arg_err_out[:2000],
+                                  "output": _full_out[:3000]}
+                p.finish_node("RUN", True,
+                              f"Exit: 0 | Duration: 0s (with test args)\n{_full_out[:500]}",
+                              evidence_retry)
+                p.save()
+                return True, _full_out, _arg_out, _arg_err_out
+
         p.finish_node("RUN", False,
                       f"Exit: {exit_code} | Duration: {duration}s\n{output[:500]}",
                       evidence)
