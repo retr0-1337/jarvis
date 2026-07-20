@@ -1659,6 +1659,9 @@ def _exec_run(p: Pipeline, language: str, task: str,
                      "arguments are required" in _combined_err or
                      "not recognized" in _combined_err or
                      ("expected" in _combined_err and "argument" in _combined_err)))
+        print(f"[PIPELINE] ARG_CHECK: exit={exit_code}, lang='{language}', "
+              f"arg_err={_arg_err}, combined_err_preview={_combined_err[:300]}",
+              file=sys.stderr)
         if _arg_err and not getattr(p, '_arg_retried', False):
             p._arg_retried = True
             _rand_vals = _generate_test_args(code, task)
