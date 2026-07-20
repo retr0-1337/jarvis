@@ -399,42 +399,63 @@ def _generate_cli_args(code: str) -> str:
     import re
     import random as _rnd
 
-    add_args = re.findall(
-        r'\.add_argument\(\s*["\']([^"\']+)["\']', code)
-    positional = [a for a in add_args if not a.startswith('-')]
+    has_argparse = bool(re.search(r'argparse\.ArgumentParser|\.parse_args\(\)', code))
+    if has_argparse:
+        arg_calls = re.findall(
+            r'\.add_argument\(\s*["\']([^"\']+)["\']([^)]*)\)', code)
+        parts = []
+        for name, kwargs in arg_calls:
+            kw = {}
+            for m in re.finditer(r'(\w+)\s*=\s*([^,\)]+)', kwargs):
+                kw[m.group(1)] = m.group(2).strip()
 
-    arg_types = {}
-    for match in re.finditer(
-        r'\.add_argument\(\s*["\']([^"\']+)["\'].*?type\s*=\s*(\w+)', code):
-        arg_name, type_name = match.group(1), match.group(2)
-        if not arg_name.startswith('-'):
-            arg_types[arg_name] = type_name
+            choices_str = kw.get('choices', '')
+            type_name = kw.get('type', '')
+            nargs = kw.get('nargs', '')
+            has_default = 'default' in kw
 
-    arg_choices = {}
-    for match in re.finditer(
-        r'\.add_argument\(\s*["\']([^"\']+)["\'].*?choices\s*=\s*\[([^\]]+)\]', code):
-        arg_name = match.group(1)
-        choices_str = match.group(2)
-        if not arg_name.startswith('-'):
-            choices = [c.strip().strip('"\'') for c in choices_str.split(',')]
-            arg_choices[arg_name] = choices
+            if has_default and nargs != 'required':
+                continue
 
-    if positional:
-        values = []
-        for arg in positional:
-            if arg in arg_choices:
-                values.append(_rnd.choice(arg_choices[arg]))
-            elif arg in arg_types:
-                t = arg_types[arg]
-                if t in ('int', 'float'):
-                    values.append(str(round(_rnd.uniform(-100, 100), 2) if t == 'float'
-                                     else _rnd.randint(-100, 100)))
+            if name.startswith('-'):
+                if choices_str:
+                    choices = re.findall(r'["\'](\w+)["\']', choices_str)
+                    parts.append(f'{name} {_rnd.choice(choices)}')
+                elif nargs and ('+' in nargs or 'REMAINDER' in nargs):
+                    n = _rnd.randint(2, 4)
+                    if type_name in ('int', 'float'):
+                        vals = [str(round(_rnd.uniform(1, 100), 2)) for _ in range(n)]
+                    else:
+                        vals = [f'val{_+1}' for _ in range(n)]
+                    parts.append(f'{name} {" ".join(vals)}')
+                elif type_name in ('int', 'float'):
+                    val = _rnd.randint(1, 100) if type_name == 'int' else round(_rnd.uniform(1, 100), 2)
+                    parts.append(f'{name} {val}')
                 else:
-                    values.append(f'test_{_rnd.randint(1,999)}')
+                    parts.append(f'{name} test_value')
             else:
-                values.append(str(round(_rnd.uniform(-50, 50), 2) if len(values) % 2 == 0
-                                 else _rnd.randint(1, 50)))
-        return ' '.join(values)
+                if choices_str:
+                    choices = re.findall(r'["\'](\w+)["\']', choices_str)
+                    parts.append(_rnd.choice(choices))
+                elif nargs and ('+' in nargs):
+                    n = _rnd.randint(2, 4)
+                    if type_name in ('int', 'float'):
+                        vals = [str(round(_rnd.uniform(1, 100), 2)) for _ in range(n)]
+                    else:
+                        vals = [f'val{_+1}' for _ in range(n)]
+                    parts.append(' '.join(vals))
+                elif type_name in ('int', 'float'):
+                    val = _rnd.randint(1, 100) if type_name == 'int' else round(_rnd.uniform(1, 100), 2)
+                    parts.append(str(val))
+                elif nargs and ('+' in nargs):
+                    n = _rnd.randint(2, 4)
+                    vals = [str(round(_rnd.uniform(1, 100), 2)) for _ in range(n)]
+                    parts.append(' '.join(vals))
+                else:
+                    parts.append(str(_rnd.randint(1, 100)))
+        if parts:
+            return ' '.join(parts)
+        return '--operation add --values 5.0 3.0'
 
     argv_refs = re.findall(r'sys\.argv\[(\d+)\]', code)
     if argv_refs:

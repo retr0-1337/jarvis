@@ -1529,48 +1529,75 @@ def _generate_test_args(code: str, task: str) -> str:
     import random as _rnd
 
     # --- Detect argparse usage ---
-    add_args = _re.findall(
-        r'\.add_argument\(\s*["\']([^"\']+)["\']', code)
-    positional = [a for a in add_args if not a.startswith('-')]
+    has_argparse = bool(_re.search(r'argparse\.ArgumentParser|\.parse_args\(\)', code))
+    if has_argparse:
+        # Parse all add_argument calls with their properties
+        arg_calls = _re.findall(
+            r'\.add_argument\(\s*["\']([^"\']+)["\']([^)]*)\)', code)
+        parts = []
+        for name, kwargs in arg_calls:
+            # Extract key=value pairs from kwargs
+            kw = {}
+            for m in _re.finditer(r'(\w+)\s*=\s*([^,\)]+)', kwargs):
+                kw[m.group(1)] = m.group(2).strip()
 
-    arg_types = {}
-    for match in _re.finditer(
-        r'\.add_argument\(\s*["\']([^"\']+)["\'].*?type\s*=\s*(\w+)', code):
-        arg_name, type_name = match.group(1), match.group(2)
-        if not arg_name.startswith('-'):
-            arg_types[arg_name] = type_name
+            choices_str = kw.get('choices', '')
+            type_name = kw.get('type', '')
+            nargs = kw.get('nargs', '')
+            has_default = 'default' in kw
 
-    arg_choices = {}
-    for match in _re.finditer(
-        r'\.add_argument\(\s*["\']([^"\']+)["\'].*?choices\s*=\s*\[([^\]]+)\]', code):
-        arg_name = match.group(1)
-        choices_str = match.group(2)
-        if not arg_name.startswith('-'):
-            choices = [c.strip().strip('"\'') for c in choices_str.split(',')]
-            arg_choices[arg_name] = choices
+            # Skip args with defaults — they're optional
+            if has_default and nargs != 'required':
+                continue
 
-    if positional:
-        values = []
-        for arg in positional:
-            if arg in arg_choices:
-                values.append(_rnd.choice(arg_choices[arg]))
-            elif arg in arg_types:
-                t = arg_types[arg]
-                if t in ('int', 'float'):
-                    values.append(str(round(_rnd.uniform(-100, 100), 2) if t == 'float'
-                                     else _rnd.randint(-100, 100)))
+            if name.startswith('-'):
+                # Optional flag: --operation add
+                if choices_str:
+                    choices = _re.findall(r'["\'](\w+)["\']', choices_str)
+                    parts.append(f'{name} {_rnd.choice(choices)}')
+                elif nargs and ('+' in nargs or 'REMAINDER' in nargs):
+                    # nargs='+' means multiple values — generate several
+                    n = _rnd.randint(2, 4)
+                    if type_name in ('int', 'float'):
+                        vals = [str(round(_rnd.uniform(1, 100), 2)) for _ in range(n)]
+                    else:
+                        vals = [f'val{_+1}' for _ in range(n)]
+                    parts.append(f'{name} {" ".join(vals)}')
+                elif type_name in ('int', 'float'):
+                    val = _rnd.randint(1, 100) if type_name == 'int' else round(_rnd.uniform(1, 100), 2)
+                    parts.append(f'{name} {val}')
                 else:
-                    values.append(f'test_{_rnd.randint(1,999)}')
+                    # String arg
+                    parts.append(f'{name} test_value')
             else:
-                task_lower = task.lower()
-                if any(w in task_lower for w in ('float', 'decimal', 'real')):
-                    values.append(str(round(_rnd.uniform(-100, 100), 2)))
-                elif any(w in task_lower for w in ('int', 'integer', 'count', 'index')):
-                    values.append(str(_rnd.randint(1, 100)))
+                # Positional arg
+                if choices_str:
+                    choices = _re.findall(r'["\'](\w+)["\']', choices_str)
+                    parts.append(_rnd.choice(choices))
+                elif nargs and ('+' in nargs):
+                    n = _rnd.randint(2, 4)
+                    if type_name in ('int', 'float'):
+                        vals = [str(round(_rnd.uniform(1, 100), 2)) for _ in range(n)]
+                    else:
+                        vals = [f'val{_+1}' for _ in range(n)]
+                    parts.append(' '.join(vals))
+                elif type_name in ('int', 'float'):
+                    val = _rnd.randint(1, 100) if type_name == 'int' else round(_rnd.uniform(1, 100), 2)
+                    parts.append(str(val))
+                elif nargs and ('+' in nargs):
+                    n = _rnd.randint(2, 4)
+                    vals = [str(round(_rnd.uniform(1, 100), 2)) for _ in range(n)]
+                    parts.append(' '.join(vals))
                 else:
-                    values.append(str(round(_rnd.uniform(-50, 50), 2) if len(values) % 2 == 0
-                                     else _rnd.randint(1, 50)))
-        return ' '.join(values)
+                    task_lower = task.lower()
+                    if any(w in task_lower for w in ('float', 'decimal', 'real')):
+                        parts.append(str(round(_rnd.uniform(1, 100), 2)))
+                    else:
+                        parts.append(str(_rnd.randint(1, 100)))
+        if parts:
+            return ' '.join(parts)
+        # Fallback: generate generic args
+        return '--operation add --values 5.0 3.0'
 
     # --- Detect sys.argv usage ---
     argv_refs = _re.findall(r'sys\.argv\[(\d+)\]', code)
