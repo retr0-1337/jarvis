@@ -112,17 +112,18 @@ def classify_task(task: str) -> TaskType:
     # Fast keyword detection for pentest tasks (no LLM needed)
     lower = task.lower()
     pentest_keywords = [
-        "scan", "nmap", "pentest", "exploit", "vulnerability", "vulnerabilities", "cve-",
+        "nmap", "pentest", "exploit", "vulnerability", "vulnerabilities", "cve-",
         "brute force", "sql injection", "xss", "buffer overflow",
         "reverse shell", "meterpreter", "metasploit", "nikto", "hydra",
         "john the ripper", "hashcat", "burp", "wireshark", "tcpdump",
-        "network scan", "port scan", "service enumeration", "os detection",
+        "port scan", "service enumeration", "os detection",
         "vulnerability scan", "web scan", "directory brute",
     ]
-    # Pentest requests need specific action words
-    pentest_actions = ["scan", "test", "check", "find", "discover", "enumerate", "brute"]
+    # Pentest requests need specific action words (matched as whole words)
+    pentest_actions = ["scan", "exploit", "pentest", "enumerate", "brute"]
     has_pentest_keyword = any(kw in lower for kw in pentest_keywords)
-    has_pentest_action = any(act in lower for act in pentest_actions)
+    # Use word boundary matching for action words to avoid false positives
+    has_pentest_action = any(re.search(r'\b' + act + r'\b', lower) for act in pentest_actions)
     # Must have target IP/hostname
     has_target = bool(re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|[\w.-]+\.\w{2,}', task))
     
@@ -600,6 +601,7 @@ class Pipeline:
         self.finished: Optional[float] = None
         self.final_response: str = ""
         self.confidence: float = 0.0
+        self.status: str = "running"
         self._graph_defs: list = []
 
     def init_nodes(self, graph_defs: list):
@@ -2658,6 +2660,106 @@ def _agentic_generate(task: str, language: str, previous_code: str = "",
     return lang or language, code
 
 
+# ──────────────────────────────────────────────────────────────────────
+# NEED_INFO: detect missing parameters before code generation
+# ──────────────────────────────────────────────────────────────────────
+
+def _detect_missing_info(task: str, language: str) -> list:
+    """Detect what information is missing from the task to write working code.
+    Returns a list of question strings, or empty list if task is complete.
+    """
+    task_lower = task.lower()
+    import re
+
+    # Check if a file/directory path is already in the task
+    _has_path = bool(re.search(r'(/[\w/.-]+|\.\w{1,4}\b|~/[\w/.-]+)', task))
+    _has_domain = bool(re.search(r'\b[\w-]+\.\w{2,}\b', task))
+    _has_port = bool(re.search(r'\bport\s*\d+', task_lower))
+    _has_url = bool(re.search(r'https?://', task))
+    _has_ip = bool(re.search(r'\d+\.\d+\.\d+\.\d+', task))
+    _has_interval = bool(re.search(r'\b(every|each|interval|every\s*\d+)', task_lower))
+
+    questions = []
+
+    # ── File path needed ──
+    if not _has_path:
+        # grep/search in files
+        if re.search(r'\bgrep\b.*\b(in|from|files?)\b', task_lower):
+            questions.append("What pattern should I search for, and in which directory?")
+        elif re.search(r'\bsearch\b.*\b(pattern|regex)\b', task_lower):
+            questions.append("What pattern should I search for, and in which file/directory?")
+        elif re.search(r'\btrailing whitespace\b.*\b(file|in|from)\b', task_lower):
+            questions.append("What file should I remove trailing whitespace from?")
+        elif re.search(r'\buniq\b', task_lower) and not _has_path:
+            questions.append("What input file should I process?")
+        elif re.search(r'\bcount\b.*\b(lines?|words?)\b.*\b(in|of)\b', task_lower) and not _has_path:
+            questions.append("What file or directory should I count in?")
+        elif re.search(r'\bword frequency\b', task_lower) and not _has_path:
+            questions.append("What text file should I analyze?")
+        elif re.search(r'\b(find|extract)\b.*\b(email|emails?)\b', task_lower) and not _has_path:
+            questions.append("What file or text should I search for emails in?")
+        elif re.search(r'\bextract\b.*\b(urls?|links?)\b', task_lower) and not _has_url and not _has_path:
+            questions.append("What URL or HTML file should I extract links from?")
+        elif re.search(r'\b(wrap|trim|format)\b.*\b(file|text)\b', task_lower) and not _has_path:
+            questions.append("What file should I process?")
+        elif re.search(r'\bdiff\b.*\b(file|two)\b', task_lower):
+            questions.append("Which two files should I compare? (e.g., /tmp/a.txt and /tmp/b.txt)")
+        elif re.search(r'\bsort\b.*\b(file|by length)\b', task_lower):
+            questions.append("What file should I sort?")
+        elif re.search(r'\b(unique words|extract words)\b', task_lower) and not _has_path:
+            questions.append("What file should I extract unique words from?")
+        elif re.search(r'\bhash\b.*\b(file|sha|md5)\b', task_lower):
+            questions.append("Which file should I compute the hash of?")
+        elif re.search(r'\bduplicate files?\b', task_lower) and not _has_path:
+            questions.append("Which directory should I scan for duplicate files?")
+        elif re.search(r'\bparse\b.*\bgit log\b', task_lower):
+            pass  # git log can be parsed from stdin, no path needed
+        elif re.search(r'\bfind\b.*\blargest files?\b', task_lower) and not _has_path:
+            questions.append("Which git repository directory should I scan?")
+        elif re.search(r'\brename\b.*\bfiles?\b', task_lower) and not _has_path:
+            questions.append("What directory contains the files to rename?")
+        elif re.search(r'\b(delete|remove|clean)\b.*\b(old|older)\b', task_lower) and not _has_path:
+            questions.append("What directory should I clean? (e.g., /tmp)")
+        elif re.search(r'\bbackup\b.*\b(directory|tar|archive)\b', task_lower) and not _has_path:
+            questions.append("What directory should I back up?")
+        elif re.search(r'\bsort\b.*\b(by length)\b', task_lower) and not _has_path:
+            questions.append("What file should I sort?")
+        elif re.search(r'\bwatch\b.*\b(directory|folder|new files)\b', task_lower) and not _has_path:
+            questions.append("Which directory should I watch for new files?")
+        elif re.search(r'\bmonitor\b.*\blog\b', task_lower) and not _has_path:
+            questions.append("Which log file should I monitor?")
+        elif re.search(r'\bconvert\b.*\b(json|csv)\b', task_lower) and not _has_path:
+            pass  # Can demo with sample data
+
+    # ── Network parameters needed ──
+    if not questions:
+        if re.search(r'\b(dns|lookup|resolve)\b', task_lower) and not _has_domain:
+            questions.append("What domain name should I look up?")
+        elif re.search(r'\bport\b.*\b(check|scan|open)\b', task_lower) and not _has_port:
+            questions.append("What host and port should I check?")
+        elif re.search(r'\bhttp server\b|\bserve files\b|\bweb server\b', task_lower) and not _has_port:
+            questions.append("What port should the server listen on?")
+        elif re.search(r'\bping\b.*\b(range|scan|ips?|hosts?)\b', task_lower) and not _has_ip:
+            questions.append("What IP range should I ping? (e.g., 192.168.1.0/24)")
+        elif re.search(r'\bdownload\b.*\b(url|file)\b', task_lower) and not _has_url:
+            questions.append("What URL should I download from?")
+        elif re.search(r'\bcheck\b.*\b(urls?|http)\b', task_lower) and not _has_url:
+            questions.append("What URLs should I check? (comma-separated)")
+
+    # ── Runtime parameters needed ──
+    if not questions:
+        if re.search(r'\b(scheduler|schedule|cron)\b', task_lower) and not _has_interval:
+            questions.append("What interval should the scheduler use? (e.g., every 60 seconds)")
+        elif re.search(r'\bchunk|group\b.*\b(of|into)\b', task_lower) and not re.search(r'\d+', task):
+            questions.append("What group size should I use?")
+        elif re.search(r'\brotate\b', task_lower) and not re.search(r'\b(by\s*\d+|by k)\b', task_lower):
+            questions.append("By how many positions should I rotate?")
+        elif re.search(r'\bbracket|parenthes\b.*\b(\d+ pairs?|n)\b', task_lower) and not re.search(r'\d+\s*pairs?', task_lower):
+            questions.append("How many pairs of brackets should I generate?")
+
+    return questions[:2]  # Max 2 questions at a time
+
+
 def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipeline:
     detected_lang = language or "python"
     ext = _file_ext(detected_lang)
@@ -2667,6 +2769,66 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
     run_ok = False
     run_output = ""
     test_output_str = ""
+
+    # ── NEED_INFO: check if we need more info before generating ──
+    missing = _detect_missing_info(task, detected_lang)
+    if missing:
+        p.start_node("NEED_INFO")
+        question_text = "I need a few details before I can write this:\n\n"
+        for i, q in enumerate(missing, 1):
+            question_text += f"{i}. {q}\n"
+        question_text += "\nPlease provide these details and I'll generate the code."
+        p.finish_node("NEED_INFO", True, question_text)
+        p.final_response = question_text
+        p.confidence = 70.0
+        p.finished = time.time()
+        p.status = "completed"
+        p.save()
+        return p
+    else:
+        p.skip_node("NEED_INFO", "All info provided")
+
+    # ── Detect long-running/untestable tasks ──
+    task_lower = task.lower()
+    _untestable_patterns = [
+        r'ping.*range', r'ping.*scan', r'ping.*ips', r'ping.*hosts',
+        r'http server', r'serve files', r'web server',
+        r'scheduler', r'\bcron\b', r'\bdaemon\b',
+        r'monitor.*real.time', r'watch.*real.time',
+        r'log.*tail', r'tail.*log',
+    ]
+    _is_untestable = any(re.search(pat, task_lower) for pat in _untestable_patterns)
+    if _is_untestable:
+        # Generate code but skip run/test — these tasks never exit or need real infra
+        p.start_node("GENERATE")
+        gen_lang, new_code = _agentic_generate(task, detected_lang, "", "", 0)
+        if new_code:
+            detected_lang = gen_lang or detected_lang
+            code = new_code
+            ext = _file_ext(detected_lang)
+            filename = f"tmp/pipeline_run{ext}"
+            _write_file(filename, code)
+            p.finish_node("GENERATE", True, f"Generated {detected_lang} code ({len(code)} chars)")
+            p.language = detected_lang
+            # Skip RUN and TEST — mark as code-only
+            p.skip_node("RUN", "Long-running task — code generated but not executed")
+            p.final_response = (f"Here's your {detected_lang} code:\n\n"
+                               f"```{detected_lang}\n{code}\n```\n\n"
+                               f"**Note:** This is a long-running/network task — "
+                               f"code generated but not executed automatically.")
+            p.confidence = 85.0
+            p.finished = time.time()
+            p.status = "completed"
+            p.save()
+            return p
+        else:
+            p.finish_node("GENERATE", False, "No code generated")
+            p.final_response = "Failed to generate code for this task."
+            p.confidence = 30.0
+            p.finished = time.time()
+            p.status = "completed"
+            p.save()
+            return p
 
     for attempt in range(_MAX_AGENTIC_ATTEMPTS):
 
@@ -2695,6 +2857,21 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
                       f"[attempt {attempt + 1}]")
         p.language = detected_lang
         p.save()
+
+        # PRE-RUN: create sample files if code references files that don't exist
+        import re as _re
+        _file_refs = _re.findall(r"open\(['\"]([^'\"]+)['\"]", code)
+        for _fpath in set(_file_refs):
+            if _fpath.startswith('/') and not _fpath.startswith('/workspace'):
+                # Check if file exists in Docker
+                _chk_exit, _chk_out = docker_env.exec_command(
+                    f"test -f {_fpath} && echo EXISTS || echo MISSING", timeout=5)
+                if "MISSING" in _chk_out:
+                    # Create a sample file with some content
+                    _sample = "hello world\n  indented line  \ntrailing spaces   \nline without newline"
+                    docker_env.exec_command(
+                        f"mkdir -p $(dirname {_fpath}) && echo '{_sample}' > {_fpath}",
+                        timeout=5)
 
         # COMPILE for compiled languages
         if detected_lang.lower() in COMPILED_LANGS:
@@ -2794,7 +2971,8 @@ def run_pipeline(task: str, language: str = "", chat_id: str = "") -> Pipeline:
         _set_progress("Simple task — fast path")
         p.task_type = TaskType.EXECUTABLE_PROGRAM
         # Skip PLAN node entirely — go straight to GENERATE
-        graph_def = [("GENERATE", []),
+        graph_def = [("NEED_INFO", []),
+                     ("GENERATE", ["NEED_INFO"]),
                      ("RUN", ["GENERATE"]),
                      ("ANSWER", ["RUN"])]
         p.init_nodes(graph_def)
@@ -2871,6 +3049,7 @@ def run_pipeline(task: str, language: str = "", chat_id: str = "") -> Pipeline:
             "STATIC_ANALYSIS":"Static analysis","SELF_REVIEW":"Self review","CONSISTENCY":"Consistency check",
             "REPAIR_LOGIC":"Fixing logic","SECURITY":"Security review","RED_TEAM":"Red team review",
             "CONFIDENCE":"Computing confidence","ANSWER":"Generating answer",
+            "NEED_INFO":"Gathering information",
             "SCAN":"Scanning network","DISCOVER":"Discovering exploits","TEST_EXPLOITS":"Testing exploits","REPORT":"Generating report"}
         _set_progress(_NODE_LABELS.get(node_id, node_id))
 
