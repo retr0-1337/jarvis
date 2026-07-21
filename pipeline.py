@@ -1874,24 +1874,42 @@ def _build_python_test(args_list: list) -> str:
         'with open(run_file) as f:\n'
         '    src = f.read()\n'
         'choices = re.findall(r\'(?:if|elif)\\s+\\w+\\s*==\\s*["\\\'](.+?)["\\\']\', src)\n'
+        'choices = [c for c in choices if c not in ("__main__", "__name__", "True", "False", "None")]\n'
         'if not choices:\n'
         '    choices = ["10", "20"]\n'
         'has_args = "sys.argv" in src or "argparse" in src or "parse_args" in src\n'
         '\n'
-        '# For each base_arg, decide if it should be a choice or a number\n'
-        'arg_types = []\n'
-        'for a in base_args:\n'
-        '    if a in choices:\n'
-        '        arg_types.append("choice")\n'
-        '    else:\n'
-        '        arg_types.append("number")\n'
+        '# Detect which positions are choices vs numbers\n'
+        '# Look for patterns like: argv[1] == "add" or operation == "+"\n'
+        'choice_positions = set()\n'
+        'for m in re.finditer(\n'
+        '    r\'sys\\.argv\\[(\\d+)\\].*?(?:if|elif).*?==\\s*["\\\'](.+?)["\\\']\', src):\n'
+        '    choice_positions.add(int(m.group(1)) - 1)  # 0-indexed\n'
+        '# Also detect via variable assignment\n'
+        'for m in re.finditer(\n'
+        '    r\'(\\w+)\\s*=\\s*sys\\.argv\\[(\\d+)\\]\', src):\n'
+        '    var, idx = m.group(1), int(m.group(2)) - 1\n'
+        '    if re.search(rf\'(?:if|elif)\\s+{var}\\s*==\\s*["\\\']\', src):\n'
+        '        choice_positions.add(idx)\n'
+        '# argparse with choices\n'
+        'for m in re.finditer(\n'
+        '    r\'add_argument\\(\\s*["\\\'](-?\\w+)["\\\'].*?choices\\s*=\\s*\\[([^\\]]+)\\]\', src):\n'
+        '    arg_name = m.group(1)\n'
+        '    if not arg_name.startswith("-"):\n'
+        '        # Positional arg with choices — find its position\n'
+        '        pos_args = re.findall(r\'add_argument\\(\\s*["\\\'](-?\\w+)["\\\']\', src)\n'
+        '        for pi, pa in enumerate(pos_args):\n'
+        '            if not pa.startswith("-") and pa == arg_name.lstrip("-"):\n'
+        '                choice_positions.add(pi)\n'
         '\n'
         '# Generate 3 test cases with different valid inputs\n'
         'cases = []\n'
         'for _ in range(3):\n'
         '    args = []\n'
         '    for i, a in enumerate(base_args):\n'
-        '        if arg_types[i] == "choice":\n'
+        '        if i in choice_positions:\n'
+        '            args.append(random.choice(choices))\n'
+        '        elif a in choices:\n'
         '            args.append(random.choice(choices))\n'
         '        else:\n'
         '            args.append(str(round(random.uniform(1, 100), 2)))\n'
@@ -1952,6 +1970,9 @@ def _exec_generate_tests(p: Pipeline, language: str, code: str, task: str,
     """Generate test file for the code. Returns (ok, test_code, test_file)."""
     p.start_node("GENERATE_TESTS")
     needs_compile = language.lower() in COMPILED_LANGS
+    test_type = "subprocess"
+    test_code = ""
+    test_lang = ""
 
     if needs_compile:
         test_type = "compile and run"
@@ -2604,6 +2625,18 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
     if not run_ok and "EOFError" in (run_stderr or ""):
         run_ok = True
 
+    # GENERATE_TESTS → EXEC_TESTS (always test the generated code)
+    test_output_str = ""
+    if run_ok:
+        try:
+            t_ok, test_code, test_file = _exec_generate_tests(
+                p, detected_lang, code, task, filename)
+            if t_ok and test_code:
+                tests_ok, test_output_str, code = _exec_run_tests(
+                    p, detected_lang, test_code, test_file, code, task, filename)
+        except Exception as e:
+            print(f"[PIPELINE] Fast path test error: {e}", file=sys.stderr)
+
     # ANSWER
     parts = []
     if run_ok:
@@ -2614,6 +2647,8 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
             parts.append(f"\n**Output:**\n```\n{run_output[:1000]}\n```")
     if filename:
         parts.append(f"\n**File:** `{filename}`")
+    if test_output_str.strip():
+        parts.append(f"\n**Test Result:**\n```\n{test_output_str[:1500]}\n```")
     p.final_response = "\n".join(parts)
 
     p.finish_node("ANSWER", True, p.final_response[:2000])
