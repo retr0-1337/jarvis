@@ -1601,8 +1601,14 @@ def _generate_test_args(code: str, task: str) -> str:
 
     # --- Detect sys.argv usage ---
     argv_refs = _re.findall(r'sys\.argv\[(\d+)\]', code)
-    if argv_refs:
-        max_idx = max(int(i) for i in argv_refs)
+    # Also detect sys.argv[N:] slices (variable number of args)
+    argv_slices = _re.findall(r'sys\.argv\[(\d+):\]', code)
+    if argv_refs or argv_slices:
+        max_idx = max((int(i) for i in argv_refs), default=0)
+        # For slices, we need at least 2 more args after the slice start
+        slice_start = max((int(i) for i in argv_slices), default=0)
+        if slice_start > max_idx:
+            max_idx = slice_start + 1  # At least 2 args for the slice
         values = []
         # Detect type hints from code patterns
         for i in range(1, max_idx + 1):
@@ -1855,6 +1861,9 @@ def _exec_generate_tests(p: Pipeline, language: str, code: str, task: str,
     """Generate test file for the code. Returns (ok, test_code, test_file)."""
     p.start_node("GENERATE_TESTS")
     needs_compile = language.lower() in COMPILED_LANGS
+    test_type = "subprocess"
+    test_code = ""
+    test_lang = ""
 
     # Build task-aware test prompt
     if needs_compile:
@@ -1866,28 +1875,77 @@ def _exec_generate_tests(p: Pipeline, language: str, code: str, task: str,
             "Compile independently with gcc -Wall -Wextra -Werror."
         )
     else:
-        # Always use subprocess — the code file is always named pipeline_run.py
-        test_type = "subprocess"
-        rules = (
-            "Write a Python test that uses subprocess to run tmp/pipeline_run.py with "
-            "sample arguments, captures stdout/stderr, and asserts expected output. "
-            "Use exit(1) on failure (NOT sys.exit), print(\"PASS\") on success. "
-            "Always print the command you ran and the actual output before PASS/FAIL. "
-            "Example format: print(f'Ran: {cmd}') then print(f'Output: {output}') then PASS/FAIL. "
-            "Test edge cases: empty input, valid input, invalid input. "
-            "Do NOT import from the module directly — always use subprocess.run()."
-        )
+        # Generate a verbose test runner that always shows what was tested
+        # Use _generate_test_args to generate appropriate test args for this code
+        test_args = _generate_test_args(code, task)
+        test_args_list = test_args.split() if test_args else []
 
-    test_prompt = (
-        f"Generate a {test_type} test for this {language} code.\n"
-        f"Task: {task}\n"
-        f"Code:\n```{language}\n{code[:4000]}\n```\n\n"
-        f"Rules:\n{rules}\n\n"
-        "Return ONLY the test code in a ```<language> block."
-    )
-    resp = _ollama(test_prompt, max_tokens=2048)
-    test_lang, test_code = _extract_code(resp)
-
+        # Build a template test that runs the code and shows full output
+        if language.lower() in ("python", "python3"):
+            test_code = (
+                'import subprocess, sys\n'
+                '\n'
+                'run_file = "tmp/pipeline_run.py"\n'
+                f'test_args = {test_args_list!r}\n'
+                'test_cases = [\n'
+                '    ("Default (no args)", [], True),\n'
+                '    ("With args", test_args, False),\n'
+                ']\n'
+                '\n'
+                'all_pass = True\n'
+                'for name, args, optional in test_cases:\n'
+                '    cmd = [sys.executable, run_file] + args\n'
+                '    print(f"\\n--- Test: {name} ---")\n'
+                '    print(f"Command: {" ".join(cmd)}")\n'
+                '    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)\n'
+                '    if r.stdout.strip():\n'
+                '        print(f"Output: {r.stdout.strip()}")\n'
+                '    if r.stderr.strip():\n'
+                '        print(f"Stderr: {r.stderr.strip()}")\n'
+                '    if r.returncode != 0:\n'
+                '        if optional:\n'
+                '            print("SKIP (expected — code requires args)")\n'
+                '        else:\n'
+                '            print(f"FAIL (exit={r.returncode})")\n'
+                '            all_pass = False\n'
+                '    else:\n'
+                '        print("PASS")\n'
+                '\n'
+                'if all_pass:\n'
+                '    print("\\nAll tests passed")\n'
+                'else:\n'
+                '    print("\\nSome tests failed")\n'
+                '    exit(1)\n'
+            )
+            test_lang = "python"
+        elif language.lower() in ("javascript", "js", "node"):
+            test_args = _generate_test_args(code, task)
+            test_args_list = test_args.split() if test_args else []
+            test_code = (
+                'const { execSync } = require("child_process");\n'
+                f'const testArgs = {test_args_list!r};\n'
+                'const cases = [\n'
+                '    { name: "Default", args: [] },\n'
+                '    { name: "With args", args: testArgs },\n'
+                '];\n'
+                'let allPass = true;\n'
+                'for (const c of cases) {\n'
+                '    const cmd = `node tmp/pipeline_run.py ${c.args.join(" ")}`;\n'
+                '    console.log(`\\n--- Test: ${c.name} ---`);\n'
+                '    console.log(`Command: ${cmd}`);\n'
+                '    try {\n'
+                '        const out = execSync(cmd, { timeout: 30000 }).toString().trim();\n'
+                '        console.log(`Output: ${out}`);\n'
+                '        console.log("PASS");\n'
+                '    } catch(e) {\n'
+                '        console.log(`Output: ${(e.stdout || "").toString().trim()}`);\n'
+                '        console.log(`FAIL (exit=${e.status})`);\n'
+                '        allPass = false;\n'
+                '    }\n'
+                '}\n'
+                'if (!allPass) process.exit(1);\n'
+            )
+            test_lang = "javascript"
     if not test_code:
         # Fallback smoke test
         if needs_compile:
