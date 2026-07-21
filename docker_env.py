@@ -474,12 +474,12 @@ def _generate_cli_args(code: str) -> str:
             all_choices = []
             if var_name:
                 all_choices = re.findall(
-                    rf'(?:if|elif)\s+{var_name}\s*==\s*["\'](\w+)["\']', code)
+                    rf'(?:if|elif)\s+{var_name}\s*==\s*["\'](.+?)["\']', code)
                 all_choices += re.findall(
-                    rf'["\'](\w+)["\']\s*==\s*{var_name}', code)
+                    rf'["\'](.+?)["\']\s*==\s*{var_name}', code)
             if not all_choices:
                 all_choices = re.findall(
-                    rf'(?:if|elif)\s+sys\.argv\[{i}\]\s*==\s*["\'](\w+)["\']', code)
+                    rf'(?:if|elif)\s+sys\.argv\[{i}\]\s*==\s*["\'](.+?)["\']', code)
             # in [...] patterns
             if not all_choices and var_name:
                 in_match = re.search(

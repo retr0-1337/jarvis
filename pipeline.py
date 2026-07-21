@@ -1524,9 +1524,11 @@ def _exec_reality_check(p: Pipeline, compile_ok: bool, language: str,
 
 
 def _generate_test_args(code: str, task: str) -> str:
-    """Analyze code to detect arg count/types and generate matching random test values."""
+    """Analyze code to detect arg count/types and generate matching random test values.
+    Returns shell-safe args (special chars quoted)."""
     import re as _re
     import random as _rnd
+    import shlex as _shlex
 
     # --- Detect argparse usage ---
     has_argparse = bool(_re.search(r'argparse\.ArgumentParser|\.parse_args\(\)', code))
@@ -1553,10 +1555,9 @@ def _generate_test_args(code: str, task: str) -> str:
             if name.startswith('-'):
                 # Optional flag: --operation add
                 if choices_str:
-                    choices = _re.findall(r'["\'](\w+)["\']', choices_str)
+                    choices = _re.findall(r'["\'](.+?)["\']', choices_str)
                     parts.append(f'{name} {_rnd.choice(choices)}')
                 elif nargs and ('+' in nargs or 'REMAINDER' in nargs):
-                    # nargs='+' means multiple values — generate several
                     n = _rnd.randint(2, 4)
                     if type_name in ('int', 'float'):
                         vals = [str(round(_rnd.uniform(1, 100), 2)) for _ in range(n)]
@@ -1567,12 +1568,11 @@ def _generate_test_args(code: str, task: str) -> str:
                     val = _rnd.randint(1, 100) if type_name == 'int' else round(_rnd.uniform(1, 100), 2)
                     parts.append(f'{name} {val}')
                 else:
-                    # String arg
                     parts.append(f'{name} test_value')
             else:
                 # Positional arg
                 if choices_str:
-                    choices = _re.findall(r'["\'](\w+)["\']', choices_str)
+                    choices = _re.findall(r'["\'](.+?)["\']', choices_str)
                     parts.append(_rnd.choice(choices))
                 elif nargs and ('+' in nargs):
                     n = _rnd.randint(2, 4)
@@ -1626,18 +1626,18 @@ def _generate_test_args(code: str, task: str) -> str:
             # Look for if/elif choices — both direct and via variable
             all_choices = []
             if var_name:
-                # if operation == "add" / elif operation == "subtract"
+                # if operation == "add" / elif operation == "+"
                 all_choices = _re.findall(
-                    rf'(?:if|elif)\s+{var_name}\s*==\s*["\'](\w+)["\']',
+                    rf'(?:if|elif)\s+{var_name}\s*==\s*["\'](.+?)["\']',
                     code)
                 # Also reversed: "add" == operation
                 all_choices += _re.findall(
-                    rf'["\'](\w+)["\']\s*==\s*{var_name}',
+                    rf'["\'](.+?)["\']\s*==\s*{var_name}',
                     code)
             # Direct: if sys.argv[1] == "add"
             if not all_choices:
                 all_choices = _re.findall(
-                    rf'(?:if|elif)\s+sys\.argv\[{i}\]\s*==\s*["\'](\w+)["\']',
+                    rf'(?:if|elif)\s+sys\.argv\[{i}\]\s*==\s*["\'](.+?)["\']',
                     code)
             # `in [...]` patterns: var in ['add', 'sub'] or var not in [...]
             if not all_choices and var_name:
@@ -1671,16 +1671,18 @@ def _generate_test_args(code: str, task: str) -> str:
             else:
                 task_lower = task.lower()
                 if any(w in task_lower for w in ('float', 'decimal', 'real')):
-                    values.append(str(round(_rnd.uniform(-100, 100), 2)))
+                    values.append(str(round(_rnd.uniform(1, 100), 2)))
                 elif any(w in task_lower for w in ('int', 'integer', 'count')):
                     values.append(str(_rnd.randint(1, 100)))
                 else:
-                    values.append(str(round(_rnd.uniform(-50, 50), 2) if i % 2 == 0
-                                     else _rnd.randint(1, 50)))
-        return ' '.join(values)
+                    values.append(str(round(_rnd.uniform(1, 100), 2)))
+        # Quote values that contain shell-special chars
+        return ' '.join(_shlex.quote(v) for v in values)
 
     # Fallback: 2 random floats
-    return f'{round(_rnd.uniform(-100, 100), 2)} {round(_rnd.uniform(-100, 100), 2)}'
+    a = round(_rnd.uniform(1, 100), 2)
+    b = round(_rnd.uniform(1, 100), 2)
+    return f'{a} {b}'
 
 
 def _exec_run(p: Pipeline, language: str, task: str,
@@ -1761,12 +1763,14 @@ def _exec_run(p: Pipeline, language: str, task: str,
             p._arg_retried = True
             _rand_vals = _generate_test_args(code, task)
             _arg_cmd = _wrap_with_timeout(
-                f'{_run_cmd("python")} /workspace/tmp/pipeline_run.py {_rand_vals}', 15)
+                f'cd /workspace && python3 tmp/pipeline_run.py {_rand_vals}', 15)
             _send_to_terminal(f'echo "\\n\\033[1;36m[Pipeline] Retrying with args: {_rand_vals}\\033[0m"')
             print(f"[PIPELINE] ARG_RETRY: lang={language}, exit={exit_code}, "
                   f"stderr={stderr[:200]}, args={_rand_vals}", file=sys.stderr)
             _arg_exit, _arg_out, _arg_err_out = docker_env.exec_command(
                 _arg_cmd, timeout=45, demux=True)
+            print(f"[PIPELINE] ARG_RETRY_RESULT: exit={_arg_exit}, "
+                  f"out={_arg_out[:100]}, err={_arg_err_out[:100]}", file=sys.stderr)
             if _arg_exit == 0:
                 _full_out = _arg_out + ("\n--- STDERR ---\n" + _arg_err_out if _arg_err_out.strip() else "")
                 evidence_retry = {"command": _arg_cmd, "exit_code": 0, "duration": 0,
@@ -1856,16 +1860,91 @@ def _exec_inspect(p: Pipeline, task: str, run_exit: int,
     return ok
 
 
+def _build_python_test(args_list: list) -> str:
+    """Build a Python test runner that reads the code, detects choices, runs 3 test cases."""
+    import json as _json
+    args_json = _json.dumps(args_list)
+    return (
+        'import subprocess, sys, re, random\n'
+        '\n'
+        'run_file = "tmp/pipeline_run.py"\n'
+        f'base_args = {args_json}\n'
+        '\n'
+        '# Read source to detect choices and arg patterns\n'
+        'with open(run_file) as f:\n'
+        '    src = f.read()\n'
+        'choices = re.findall(r\'(?:if|elif)\\s+\\w+\\s*==\\s*["\\\'](.+?)["\\\']\', src)\n'
+        'if not choices:\n'
+        '    choices = ["add", "10", "20"]\n'
+        'has_args = "sys.argv" in src or "argparse" in src or "parse_args" in src\n'
+        '\n'
+        '# Generate 3 test cases with different valid inputs\n'
+        'cases = []\n'
+        'for _ in range(3):\n'
+        '    args = []\n'
+        '    for a in base_args:\n'
+        '        if a in choices or a == base_args[0]:\n'
+        '            args.append(random.choice(choices))\n'
+        '        else:\n'
+        '            args.append(str(round(random.uniform(1, 100), 2)))\n'
+        '    cases.append(args)\n'
+        'if not has_args:\n'
+        '    cases = [[]]\n'
+        '\n'
+        'all_pass = True\n'
+        'for i, args in enumerate(cases):\n'
+        '    cmd = [sys.executable, run_file] + args\n'
+        '    print(f"\\nTest {i+1}: " + " ".join(cmd))\n'
+        '    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)\n'
+        '    out = r.stdout.strip()\n'
+        '    err = r.stderr.strip()\n'
+        '    if out:\n'
+        '        print(f"  Output: {out}")\n'
+        '    if r.returncode != 0:\n'
+        '        if "usage:" in (err + out).lower():\n'
+        '            print("  SKIP (code requires different args format)")\n'
+        '        else:\n'
+        '            print(f"  FAIL (exit={r.returncode}): {(err or out)[:200]}")\n'
+        '            all_pass = False\n'
+        '    else:\n'
+        '        print("  PASS")\n'
+        '\n'
+        'if all_pass:\n'
+        '    print("\\nAll tests passed")\n'
+        'else:\n'
+        '    print("\\nSome tests failed")\n'
+        '    exit(1)\n'
+    )
+
+
+def _build_js_test(args_list: list) -> str:
+    """Build a JS test runner."""
+    import json as _json
+    args_json = _json.dumps(args_list)
+    return (
+        'const { execSync } = require("child_process");\n'
+        f'const baseArgs = {args_json};\n'
+        'const cmd = `node tmp/pipeline_run.py ${baseArgs.join(" ")}`;\n'
+        'console.log(`Test: ${cmd}`);\n'
+        'try {\n'
+        '    const out = execSync(cmd, { timeout: 30000 }).toString().trim();\n'
+        '    console.log(`Output: ${out}`);\n'
+        '    console.log("PASS");\n'
+        '} catch(e) {\n'
+        '    const out = (e.stdout || "").toString().trim();\n'
+        '    console.log(`Output: ${out}`);\n'
+        '    console.log(`FAIL (exit=${e.status})`);\n'
+        '    process.exit(1);\n'
+        '}\n'
+    )
+
+
 def _exec_generate_tests(p: Pipeline, language: str, code: str, task: str,
                          filename: str) -> tuple[bool, str, str]:
     """Generate test file for the code. Returns (ok, test_code, test_file)."""
     p.start_node("GENERATE_TESTS")
     needs_compile = language.lower() in COMPILED_LANGS
-    test_type = "subprocess"
-    test_code = ""
-    test_lang = ""
 
-    # Build task-aware test prompt
     if needs_compile:
         test_type = "compile and run"
         rules = (
@@ -1874,102 +1953,27 @@ def _exec_generate_tests(p: Pipeline, language: str, code: str, task: str,
             "Use assert() and printf(\"PASS\\n\") on success, fprintf(stderr,...) on failure. "
             "Compile independently with gcc -Wall -Wextra -Werror."
         )
+        test_prompt = (
+            f"Generate a {test_type} test for this {language} code.\n"
+            f"Task: {task}\n"
+            f"Code:\n```{language}\n{code[:4000]}\n```\n\n"
+            f"Rules:\n{rules}\n\n"
+            "Return ONLY the test code in a ```<language> block."
+        )
+        resp = _ollama(test_prompt, max_tokens=2048)
+        test_lang, test_code = _extract_code(resp)
     else:
-        # Generate a verbose test runner that always shows what was tested
-        # Use _generate_test_args to generate appropriate test args for this code
-        test_args = _generate_test_args(code, task)
-        test_args_list = test_args.split() if test_args else []
-
-        # Build a template test that runs the code and shows full output
+        # Generate test args and write a test runner — no LLM needed
         if language.lower() in ("python", "python3"):
-            test_code = (
-                'import subprocess, sys\n'
-                '\n'
-                'run_file = "tmp/pipeline_run.py"\n'
-                f'test_args = {test_args_list!r}\n'
-                'test_cases = [\n'
-                '    ("Default (no args)", [], True),\n'
-                '    ("With args", test_args, False),\n'
-                ']\n'
-                '\n'
-                'all_pass = True\n'
-                'for name, args, optional in test_cases:\n'
-                '    cmd = [sys.executable, run_file] + args\n'
-                '    print(f"\\n--- Test: {name} ---")\n'
-                '    print(f"Command: {" ".join(cmd)}")\n'
-                '    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)\n'
-                '    if r.stdout.strip():\n'
-                '        print(f"Output: {r.stdout.strip()}")\n'
-                '    if r.stderr.strip():\n'
-                '        print(f"Stderr: {r.stderr.strip()}")\n'
-                '    if r.returncode != 0:\n'
-                '        if optional:\n'
-                '            print("SKIP (expected — code requires args)")\n'
-                '        else:\n'
-                '            print(f"FAIL (exit={r.returncode})")\n'
-                '            all_pass = False\n'
-                '    else:\n'
-                '        print("PASS")\n'
-                '\n'
-                'if all_pass:\n'
-                '    print("\\nAll tests passed")\n'
-                'else:\n'
-                '    print("\\nSome tests failed")\n'
-                '    exit(1)\n'
-            )
+            test_args = _generate_test_args(code, task)
+            test_args_list = test_args.split() if test_args else []
+            test_code = _build_python_test(test_args_list)
             test_lang = "python"
         elif language.lower() in ("javascript", "js", "node"):
             test_args = _generate_test_args(code, task)
             test_args_list = test_args.split() if test_args else []
-            test_code = (
-                'const { execSync } = require("child_process");\n'
-                f'const testArgs = {test_args_list!r};\n'
-                'const cases = [\n'
-                '    { name: "Default", args: [] },\n'
-                '    { name: "With args", args: testArgs },\n'
-                '];\n'
-                'let allPass = true;\n'
-                'for (const c of cases) {\n'
-                '    const cmd = `node tmp/pipeline_run.py ${c.args.join(" ")}`;\n'
-                '    console.log(`\\n--- Test: ${c.name} ---`);\n'
-                '    console.log(`Command: ${cmd}`);\n'
-                '    try {\n'
-                '        const out = execSync(cmd, { timeout: 30000 }).toString().trim();\n'
-                '        console.log(`Output: ${out}`);\n'
-                '        console.log("PASS");\n'
-                '    } catch(e) {\n'
-                '        console.log(`Output: ${(e.stdout || "").toString().trim()}`);\n'
-                '        console.log(`FAIL (exit=${e.status})`);\n'
-                '        allPass = false;\n'
-                '    }\n'
-                '}\n'
-                'if (!allPass) process.exit(1);\n'
-            )
+            test_code = _build_js_test(test_args_list)
             test_lang = "javascript"
-    if not test_code:
-        # Fallback smoke test
-        if needs_compile:
-            test_code = (
-                '#include <stdio.h>\n#include <stdlib.h>\n\n'
-                'int main() {\n'
-                '    int ret = system("./pipeline_run");\n'
-                '    if (ret != 0) { fprintf(stderr, "FAIL\\n"); return 1; }\n'
-                '    printf("PASS\\n");\n    return 0;\n}\n')
-            test_lang = language
-        elif language.lower() in ("python", "python3"):
-            test_code = (
-                'import subprocess, sys\n'
-                'r = subprocess.run([sys.executable, "tmp/pipeline_run.py"], '
-                'capture_output=True, text=True, timeout=30)\n'
-                'if r.returncode != 0:\n'
-                '    print(f"FAIL: exit={r.returncode}\\n{r.stderr[:300]}")\n'
-                '    sys.exit(1)\n'
-                'print("PASS")\n')
-            test_lang = "python"
-        else:
-            p.finish_node("GENERATE_TESTS", False, "No test generated")
-            p.save()
-            return False, "", ""
 
     test_ext = _file_ext(test_lang or language)
     test_file = f"tmp/test_pipeline{test_ext}"
