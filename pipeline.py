@@ -1861,101 +1861,98 @@ def _exec_inspect(p: Pipeline, task: str, run_exit: int,
 
 
 def _build_python_test(args_list: list) -> str:
-    """Build a Python test runner that reads the code, detects choices, runs 3 test cases."""
+    """Build a Python test runner that reads the code, detects patterns, runs 3 test cases."""
     import json as _json
     args_json = _json.dumps(args_list)
-    return (
-        'import subprocess, sys, re, random\n'
-        '\n'
-        'run_file = "tmp/pipeline_run.py"\n'
-        f'base_args = {args_json}\n'
-        '\n'
-        '# Read source to detect choices and arg patterns\n'
-        'with open(run_file) as f:\n'
-        '    src = f.read()\n'
-        '# Extract choices from if/elif patterns\n'
-        'choices = re.findall(r\'(?:if|elif)\\s+\\w+\\s*==\\s*["\\\'](.+?)["\\\']\', src)\n'
-        'choices = [c for c in choices if c not in ("__main__", "__name__", "True", "False", "None")]\n'
-        '\n'
-        '# Also extract choices from argparse and input() prompts\n'
-        'for m in re.finditer(r\'choices\\s*=\\s*\\[([^\\]]+)\\]\', src):\n'
-        '    raw = m.group(1)\n'
-        '    argparse_choices = re.findall(r\'["\\\'](.+?)["\\\']\', raw)\n'
-        '    choices.extend(argparse_choices)\n'
-        'if not choices:\n'
-        '    choices = ["10", "20"]\n'
-        'has_args = "sys.argv" in src or "argparse" in src or "parse_args" in src\n'
-        '\n'
-        '# Detect which positions are choices vs numbers\n'
-        '# Look for patterns like: argv[1] == "add" or operation == "+"\n'
-        'choice_positions = set()\n'
-        'for m in re.finditer(\n'
-        '    r\'sys\\.argv\\[(\\d+)\\].*?(?:if|elif).*?==\\s*["\\\'](.+?)["\\\']\', src):\n'
-        '    choice_positions.add(int(m.group(1)) - 1)  # 0-indexed\n'
-        '# Also detect via variable assignment\n'
-        'for m in re.finditer(\n'
-        '    r\'(\\w+)\\s*=\\s*sys\\.argv\\[(\\d+)\\]\', src):\n'
-        '    var, idx = m.group(1), int(m.group(2)) - 1\n'
-        '    if re.search(rf\'(?:if|elif)\\s+{var}\\s*==\\s*["\\\']\', src):\n'
-        '        choice_positions.add(idx)\n'
-        '# argparse with choices\n'
-        'for m in re.finditer(\n'
-        '    r\'add_argument\\(\\s*["\\\'](-?\\w+)["\\\'].*?choices\\s*=\\s*\\[([^\\]]+)\\]\', src):\n'
-        '    arg_name = m.group(1)\n'
-        '    if not arg_name.startswith("-"):\n'
-        '        # Positional arg with choices — find its position\n'
-        '        pos_args = re.findall(r\'add_argument\\(\\s*["\\\'](-?\\w+)["\\\']\', src)\n'
-        '        for pi, pa in enumerate(pos_args):\n'
-        '            if not pa.startswith("-") and pa == arg_name.lstrip("-"):\n'
-        '                choice_positions.add(pi)\n'
-        '\n'
-        '# Detect if code expects int or float args\n'
-        'needs_int = bool(re.search(r"int\\(.*?sys\\.argv\\[|int\\(.*?argparse|type=int", src))\n'
-        'needs_float = bool(re.search(r"float\\(.*?sys\\.argv\\[|type=float", src))\n'
-        '\n'
-        '# Generate 3 test cases with different valid inputs\n'
-        'cases = []\n'
-        'for _ in range(3):\n'
-        '    args = []\n'
-        '    for i, a in enumerate(base_args):\n'
-        '        if i in choice_positions:\n'
-        '            args.append(random.choice(choices))\n'
-        '        elif a in choices:\n'
-        '            args.append(random.choice(choices))\n'
-        '        elif needs_int:\n'
-        '            args.append(str(random.randint(1, 100)))\n'
-        '        elif needs_float:\n'
-        '            args.append(str(round(random.uniform(1, 100), 2)))\n'
-        '        else:\n'
-        '            args.append(str(round(random.uniform(1, 100), 2)))\n'
-        '    cases.append(args)\n'
-        'if not has_args:\n'
-        '    cases = [[]]\n'
-        '\n'
-        'all_pass = True\n'
-        'for i, args in enumerate(cases):\n'
-        '    cmd = [sys.executable, run_file] + args\n'
-        '    print(f"\\nTest {i+1}: " + " ".join(cmd))\n'
-        '    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)\n'
-        '    out = r.stdout.strip()\n'
-        '    err = r.stderr.strip()\n'
-        '    if out:\n'
-        '        print(f"  Output: {out}")\n'
-        '    if r.returncode != 0:\n'
-        '        if "usage:" in (err + out).lower():\n'
-        '            print("  SKIP (code requires different args format)")\n'
-        '        else:\n'
-        '            print(f"  FAIL (exit={r.returncode}): {(err or out)[:200]}")\n'
-        '            all_pass = False\n'
-        '    else:\n'
-        '        print("  PASS")\n'
-        '\n'
-        'if all_pass:\n'
-        '    print("\\nAll tests passed")\n'
-        'else:\n'
-        '    print("\\nSome tests failed")\n'
-        '    exit(1)\n'
-    )
+    return _PYTHON_TEST_TEMPLATE.format(args_json=args_json)
+
+
+_PYTHON_TEST_TEMPLATE = r'''import subprocess, sys, re, random, json as _json
+
+run_file = "tmp/pipeline_run.py"
+base_args = {args_json}
+
+with open(run_file) as f:
+    src = f.read()
+
+choices = re.findall(r"""(?:if|elif)\s+\w+\s*==\s*(['"][^'"]+['"])""", src)
+choices = [c.strip().strip("'\"") for c in choices]
+choices = [c for c in choices if c and c not in ("__main__", "__name__", "True", "False", "None")]
+for m in re.finditer(r"""choices\s*=\s*\[([^\]]+)\]""", src):
+    choices.extend(x.strip().strip("'\"") for x in m.group(1).split(",") if x.strip())
+if not choices:
+    choices = ["10", "20"]
+has_args = "sys.argv" in src or "argparse" in src or "parse_args" in src
+needs_int = bool(re.search(r"int\(.*?sys\.argv|type=int", src))
+
+arg_defs = []
+for m in re.finditer(r"""\.add_argument\(([^)]+)\)""", src):
+    raw = m.group(1)
+    nm = re.search(r"""^['"\s]*([^'"\s,]+)""", raw)
+    if nm:
+        kw = dict(re.findall(r"""(\w+)\s*=\s*([^,)]+)""", raw))
+        arg_defs.append((nm.group(1).strip("'\""), kw))
+
+def gen_args():
+    if not arg_defs:
+        if not has_args:
+            return []
+        return [str(random.randint(1, 100)) if needs_int
+                else str(round(random.uniform(1, 100), 2))
+                for _ in base_args]
+    parts = []
+    for name, kw in arg_defs:
+        if "default" in kw:
+            continue
+        if name.startswith("-"):
+            if "choices" in kw:
+                ch = re.findall(r"""['"]([^'"]+)['"]""", kw["choices"])
+                parts.extend([name, random.choice(ch) if ch else "csv"])
+            elif kw.get("type", "") in ("int", "float"):
+                v = random.randint(1, 100) if kw["type"] == "int" else round(random.uniform(1, 100), 2)
+                parts.extend([name, str(v)])
+            else:
+                parts.extend([name, "test_value"])
+        else:
+            if "choices" in kw:
+                ch = re.findall(r"""['"]([^'"]+)['"]""", kw["choices"])
+                parts.append(random.choice(ch) if ch else "add")
+            elif kw.get("type", "") == "int":
+                parts.append(str(random.randint(1, 100)))
+            elif kw.get("type", "") == "float":
+                parts.append(str(round(random.uniform(1, 100), 2)))
+            else:
+                parts.append("test_value")
+    return parts
+
+cases = [gen_args() for _ in range(3)]
+if not has_args:
+    cases = [[]]
+
+all_pass = True
+for i, args in enumerate(cases):
+    cmd = [sys.executable, run_file] + args
+    print(f"\nTest {{i+1}}: " + " ".join(cmd))
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    out = r.stdout.strip()
+    err = r.stderr.strip()
+    if out:
+        print(f"  Output: {{out}}")
+    if r.returncode != 0:
+        if "usage:" in (err + out).lower():
+            print("  SKIP (code requires different args format)")
+        else:
+            print(f"  FAIL (exit={{r.returncode}}): {{(err or out)[:200]}}")
+            all_pass = False
+    else:
+        print("  PASS")
+
+if all_pass:
+    print("\nAll tests passed")
+else:
+    print("\nSome tests failed")
+    exit(1)
+'''
 
 
 def _build_js_test(args_list: list) -> str:
