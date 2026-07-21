@@ -1309,7 +1309,7 @@ def _exec_generate(p: Pipeline, task: str, language: str, plan: dict,
                     p.language = detected
                     return detected, code
         except Exception as e:
-            print(f"[PIPELINE] Bridge failed, falling back to LLM: {e}", file=sys.stderr)
+            pass
 
         prompt += (
             "\n\nSECURITY RESEARCH MODE:\n"
@@ -1619,8 +1619,9 @@ def _generate_test_args(code: str, task: str) -> str:
                 rf'int\s*\(\s*sys\.argv\[{i}\]', code))
 
             # Find variable assigned from this argv: operation = sys.argv[1]
+            # Also handles: var = float(sys.argv[1]), var = int(sys.argv[1])
             var_match = _re.search(
-                rf'(\w+)\s*=\s*sys\.argv\[{i}\]', code)
+                rf'(\w+)\s*=\s*(?:\w+\s*\(\s*)?sys\.argv\[{i}\]', code)
             var_name = var_match.group(1) if var_match else None
 
             # Look for if/elif choices — both direct and via variable
@@ -1756,21 +1757,14 @@ def _exec_run(p: Pipeline, language: str, task: str,
                        ("expected" in _combined_err and "argument" in _combined_err))
         _arg_err = ("python" in language.lower() and
                     _usage_like and exit_code in (1, 2))
-        print(f"[PIPELINE] ARG_CHECK: exit={exit_code}, lang='{language}', "
-              f"arg_err={_arg_err}, combined_err_preview={_combined_err[:300]}",
-              file=sys.stderr)
         if _arg_err and not getattr(p, '_arg_retried', False):
             p._arg_retried = True
             _rand_vals = _generate_test_args(code, task)
             _arg_cmd = _wrap_with_timeout(
                 f'cd /workspace && python3 tmp/pipeline_run.py {_rand_vals}', 15)
             _send_to_terminal(f'echo "\\n\\033[1;36m[Pipeline] Retrying with args: {_rand_vals}\\033[0m"')
-            print(f"[PIPELINE] ARG_RETRY: lang={language}, exit={exit_code}, "
-                  f"stderr={stderr[:200]}, args={_rand_vals}", file=sys.stderr)
             _arg_exit, _arg_out, _arg_err_out = docker_env.exec_command(
                 _arg_cmd, timeout=45, demux=True)
-            print(f"[PIPELINE] ARG_RETRY_RESULT: exit={_arg_exit}, "
-                  f"out={_arg_out[:100]}, err={_arg_err_out[:100]}", file=sys.stderr)
             if _arg_exit == 0:
                 _full_out = _arg_out + ("\n--- STDERR ---\n" + _arg_err_out if _arg_err_out.strip() else "")
                 evidence_retry = {"command": _arg_cmd, "exit_code": 0, "duration": 0,
@@ -1875,55 +1869,88 @@ base_args = {args_json}
 with open(run_file) as f:
     src = f.read()
 
-choices = re.findall(r"""(?:if|elif)\s+\w+\s*==\s*(['"][^'"]+['"])""", src)
-choices = [c.strip().strip("'\"") for c in choices]
-choices = [c for c in choices if c and c not in ("__main__", "__name__", "True", "False", "None")]
-for m in re.finditer(r"""choices\s*=\s*\[([^\]]+)\]""", src):
-    choices.extend(x.strip().strip("'\"") for x in m.group(1).split(",") if x.strip())
-if not choices:
-    choices = ["10", "20"]
 has_args = "sys.argv" in src or "argparse" in src or "parse_args" in src
-needs_int = bool(re.search(r"int\(.*?sys\.argv|type=int", src))
-
-arg_defs = []
-for m in re.finditer(r"""\.add_argument\(([^)]+)\)""", src):
-    raw = m.group(1)
-    nm = re.search(r"""^['"\s]*([^'"\s,]+)""", raw)
-    if nm:
-        kw = dict(re.findall(r"""(\w+)\s*=\s*([^,)]+)""", raw))
-        arg_defs.append((nm.group(1).strip("'\""), kw))
 
 def gen_args():
-    if not arg_defs:
-        if not has_args:
+    """Smart arg generation: detect operator patterns, argparse choices, types."""
+    # Detect sys.argv positions and their types
+    argv_refs = re.findall(r'sys\.argv\[(\d+)\]', src)
+    if not argv_refs:
+        # No sys.argv — try argparse
+        arg_defs = []
+        for m in re.finditer(r"""\.add_argument\(([^)]+)\)""", src):
+            raw = m.group(1)
+            nm = re.search(r"""^['"\s]*([^'"\s,]+)""", raw)
+            if nm:
+                kw = dict(re.findall(r"""(\w+)\s*=\s*([^,)]+)""", raw))
+                arg_defs.append((nm.group(1).strip("'\""), kw))
+        if not arg_defs:
             return []
-        return [str(random.randint(1, 100)) if needs_int
-                else str(round(random.uniform(1, 100), 2))
-                for _ in base_args]
-    parts = []
-    for name, kw in arg_defs:
-        if "default" in kw:
-            continue
-        if name.startswith("-"):
-            if "choices" in kw:
-                ch = re.findall(r"""['"]([^'"]+)['"]""", kw["choices"])
-                parts.extend([name, random.choice(ch) if ch else "csv"])
-            elif kw.get("type", "") in ("int", "float"):
-                v = random.randint(1, 100) if kw["type"] == "int" else round(random.uniform(1, 100), 2)
-                parts.extend([name, str(v)])
+        parts = []
+        for name, kw in arg_defs:
+            if "default" in kw:
+                continue
+            if name.startswith("-"):
+                if "choices" in kw:
+                    ch = re.findall(r"""['"]([^'"]+)['"]""", kw["choices"])
+                    parts.extend([name, random.choice(ch) if ch else "csv"])
+                elif kw.get("type", "") in ("int", "float"):
+                    v = random.randint(1, 100) if kw["type"] == "int" else round(random.uniform(1, 100), 2)
+                    parts.extend([name, str(v)])
+                else:
+                    parts.extend([name, "test_value"])
             else:
-                parts.extend([name, "test_value"])
+                if "choices" in kw:
+                    ch = re.findall(r"""['"]([^'"]+)['"]""", kw["choices"])
+                    parts.append(random.choice(ch) if ch else "add")
+                elif kw.get("type", "") == "int":
+                    parts.append(str(random.randint(1, 100)))
+                elif kw.get("type", "") == "float":
+                    parts.append(str(round(random.uniform(1, 100), 2)))
+                else:
+                    parts.append("test_value")
+        return parts
+
+    # sys.argv detected — find variable names and choices for each position
+    max_idx = max((int(i) for i in argv_refs), default=0)
+    values = []
+    for i in range(1, max_idx + 1):
+        # Find variable: var = float(sys.argv[2]) or var = sys.argv[2]
+        var_match = re.search(
+            rf'(\w+)\s*=\s*(?:\w+\s*\(\s*)?sys\.argv\[{{i}}\]', src)
+        var_name = var_match.group(1) if var_match else None
+
+        # Detect type
+        uses_float = bool(re.search(rf'float\s*\(\s*sys\.argv\[{{i}}\]', src))
+        uses_int = bool(re.search(rf'int\s*\(\s*sys\.argv\[{{i}}\]', src))
+
+        # Find choices from if/elif comparisons
+        all_choices = []
+        if var_name:
+            all_choices = re.findall(
+                rf'(?:if|elif)\s+{{var_name}}\s*==\s*["\'](.+?)["\']', src)
+            all_choices += re.findall(
+                rf'["\'](.+?)["\']\s*==\s*{{var_name}}', src)
+        if not all_choices:
+            all_choices = re.findall(
+                rf'(?:if|elif)\s+sys\.argv\[{{i}}\]\s*==\s*["\'](.+?)["\']', src)
+        # in [...] patterns
+        if not all_choices and var_name:
+            in_match = re.search(
+                rf'{{var_name}}\s+(?:not\s+)?in\s*\[([^\]]+)\]', src)
+            if in_match:
+                all_choices = [c.strip().strip('"\'')
+                               for c in in_match.group(1).split(',')]
+
+        if all_choices:
+            values.append(random.choice(all_choices))
+        elif uses_float:
+            values.append(str(round(random.uniform(1, 100), 2)))
+        elif uses_int:
+            values.append(str(random.randint(1, 100)))
         else:
-            if "choices" in kw:
-                ch = re.findall(r"""['"]([^'"]+)['"]""", kw["choices"])
-                parts.append(random.choice(ch) if ch else "add")
-            elif kw.get("type", "") == "int":
-                parts.append(str(random.randint(1, 100)))
-            elif kw.get("type", "") == "float":
-                parts.append(str(round(random.uniform(1, 100), 2)))
-            else:
-                parts.append("test_value")
-    return parts
+            values.append(str(round(random.uniform(1, 100), 2)))
+    return values
 
 cases = [gen_args() for _ in range(3)]
 if not has_args:
@@ -2598,65 +2625,125 @@ def _exec_pentest_report(p: Pipeline, target: str, raw_stdout: str,
     return report
 
 
-# ── Fast Path (simple code generation) ──────────────────────────────────
+# ── Fast Path (agentic loop) ─────────────────────────────────────────
+
+_MAX_AGENTIC_ATTEMPTS = 3
+
+
+def _agentic_generate(task: str, language: str, previous_code: str = "",
+                      error_context: str = "", attempt: int = 0) -> tuple[str, str]:
+    if attempt == 0:
+        prompt = (
+            f"Write a complete, working {language} program for this task.\n"
+            f"Rules:\n"
+            f"1. Output a single ```{language} code block.\n"
+            f"2. Write the ENTIRE program, no placeholders.\n"
+            f"3. Brief explanation after the code.\n"
+            f"Task: {task}"
+        )
+    else:
+        prompt = (
+            "The previous code FAILED. Analyze the error and fix it.\n\n"
+            f"Original task: {task}\n\n"
+            f"Current code:\n```{language}\n{previous_code}\n```\n\n"
+            f"Error output:\n{error_context[:2000]}\n\n"
+            "INSTRUCTIONS:\n"
+            "1. Read the error carefully — what exactly went wrong?\n"
+            "2. Fix ONLY the broken part — do not rewrite working code\n"
+            "3. Return the COMPLETE fixed code in a ```language block\n"
+            "4. Explain what you fixed in 1-2 sentences\n"
+        )
+    raw = _ollama(prompt, max_tokens=4096)
+    lang, code = _extract_code(raw)
+    return lang or language, code
+
 
 def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipeline:
-    """Fast pipeline for simple code generation — GENERATE → RUN → ANSWER."""
     detected_lang = language or "python"
-
-    # GENERATE (no plan — direct prompt)
-    p.start_node("GENERATE")
-    prompt = (
-        f"Write a complete, working {detected_lang} program for this task.\n"
-        f"Rules:\n"
-        f"1. Output a single ```{detected_lang} code block.\n"
-        f"2. Write the ENTIRE program, no placeholders.\n"
-        f"3. Brief explanation after the code.\n"
-        f"Task: {task}"
-    )
-    raw = _ollama(prompt, max_tokens=4096)
-    gen_lang, code = _extract_code(raw)
-    if not code:
-        p.finish_node("GENERATE", False, "No code generated")
-        p.finished = time.time()
-        p.status = "failed"
-        p.save()
-        _set_progress("Failed: no code generated")
-        return p
-    detected_lang = gen_lang or detected_lang
     ext = _file_ext(detected_lang)
     filename = f"tmp/pipeline_run{ext}"
-    _write_file(filename, code)
-    p.finish_node("GENERATE", True, f"Generated {detected_lang} code ({len(code)} chars)")
-    p.language = detected_lang
-    p.save()
 
-    # RUN
-    run_ok, run_output, run_stdout, run_stderr = _exec_run(p, detected_lang, task, code)
-    # Interactive programs fail with EOFError on input() — that's OK, code works
-    if not run_ok and "EOFError" in (run_stderr or ""):
-        run_ok = True
-
-    # GENERATE_TESTS → EXEC_TESTS (always test the generated code)
+    code = ""
+    run_ok = False
+    run_output = ""
     test_output_str = ""
-    if run_ok:
+
+    for attempt in range(_MAX_AGENTIC_ATTEMPTS):
+
+        # GENERATE or FIX
+        p.start_node("GENERATE")
+        error_ctx = ""
+        if not run_ok and run_output:
+            error_ctx = run_output
+        elif test_output_str and "FAIL" in test_output_str.upper():
+            error_ctx = test_output_str
+
+        gen_lang, new_code = _agentic_generate(
+            task, detected_lang, code, error_ctx, attempt)
+
+        if not new_code:
+            p.finish_node("GENERATE", False, "No code generated")
+            p.save()
+            continue
+
+        detected_lang = gen_lang or detected_lang
+        code = new_code
+        _write_file(filename, code)
+        action = "Fixed" if attempt > 0 else "Generated"
+        p.finish_node("GENERATE", True,
+                      f"{action} {detected_lang} code ({len(code)} chars) "
+                      f"[attempt {attempt + 1}]")
+        p.language = detected_lang
+        p.save()
+
+        # COMPILE for compiled languages
+        if detected_lang.lower() in COMPILED_LANGS:
+            compile_cmd = _compile_cmd(detected_lang, filename)
+            if compile_cmd:
+                c_exit, c_out, c_err = docker_env.exec_command(
+                    compile_cmd, timeout=60, demux=True)
+                if c_exit != 0:
+                    run_output = f"Compilation failed:\n{c_out}\n{c_err}"
+                    run_ok = False
+                    if attempt < _MAX_AGENTIC_ATTEMPTS - 1:
+                        continue
+                    break
+
+        # RUN
+        run_ok, run_output, run_stdout, run_stderr = _exec_run(
+            p, detected_lang, task, code)
+        if not run_ok and "EOFError" in (run_stderr or ""):
+            run_ok = True
+
+        if not run_ok:
+            if attempt < _MAX_AGENTIC_ATTEMPTS - 1:
+                continue
+            break
+
+        # GENERATE_TESTS + EXEC_TESTS
+        test_output_str = ""
         try:
             t_ok, test_code, test_file = _exec_generate_tests(
                 p, detected_lang, code, task, filename)
             if t_ok and test_code:
                 tests_ok, test_output_str, code = _exec_run_tests(
                     p, detected_lang, test_code, test_file, code, task, filename)
+                if not tests_ok:
+                    if attempt < _MAX_AGENTIC_ATTEMPTS - 1:
+                        run_ok = False
+                        continue
         except Exception as e:
-            print(f"[PIPELINE] Fast path test error: {e}", file=sys.stderr)
+            pass
+
+        if run_ok:
+            break
 
     # ANSWER
     parts = []
-    if run_ok:
+    if code:
         parts.append(f"Here's your {detected_lang} code:\n\n```{detected_lang}\n{code}\n```")
-    else:
-        parts.append(f"Here's your {detected_lang} code:\n\n```{detected_lang}\n{code}\n```")
-        if run_output.strip():
-            parts.append(f"\n**Output:**\n```\n{run_output[:1000]}\n```")
+    if not run_ok and run_output.strip():
+        parts.append(f"\n**Output:**\n```\n{run_output[:1000]}\n```")
     if filename:
         parts.append(f"\n**File:** `{filename}`")
     if test_output_str.strip():
@@ -2669,7 +2756,6 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
     p.save()
     _set_progress(f"Done ({p.confidence}% confidence)")
     return p
-
 
 # ── Main Pipeline ──────────────────────────────────────────────────────
 
@@ -2703,7 +2789,7 @@ def run_pipeline(task: str, language: str = "", chat_id: str = "") -> Pipeline:
     # Fast path for simple code generation (skip heavy verification)
     _simple_keywords = ["give me", "write me", "create a", "make a", "generate a", "write a", "create me"]
     _is_simple = any(kw in task.lower() for kw in _simple_keywords) and p.task_type in (
-        TaskType.EXECUTABLE_PROGRAM, TaskType.SCRIPT, TaskType.ALGORITHM)
+        TaskType.EXECUTABLE_PROGRAM, TaskType.SCRIPT, TaskType.ALGORITHM, TaskType.CLI_TOOL)
     if _is_simple:
         _set_progress("Simple task — fast path")
         p.task_type = TaskType.EXECUTABLE_PROGRAM

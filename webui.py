@@ -565,6 +565,14 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps({"chats": chats, "active": active}).encode())
 
         elif path == "/newchat":
+            # Generate mid-term summary for old chat before creating new
+            try:
+                import jarvis_memory
+                old_cid = get_active_chat()
+                if old_cid:
+                    jarvis_memory.add_mid_term(old_cid)
+            except Exception:
+                pass
             cid = new_chat()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -574,6 +582,14 @@ class Handler(SimpleHTTPRequestHandler):
         elif path == "/switchchat":
             cid = params.get("id", [""])[0]
             if cid and os.path.exists(os.path.join(CHATS_DIR, cid + ".log")):
+                # Generate mid-term summary for old chat before switching
+                try:
+                    import jarvis_memory
+                    old_cid = get_active_chat()
+                    if old_cid and old_cid != cid:
+                        jarvis_memory.add_mid_term(old_cid)
+                except Exception:
+                    pass
                 with open(ACTIVE_CHAT_FILE, "w") as f:
                     f.write(cid)
                 self.send_response(200)

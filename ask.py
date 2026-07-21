@@ -446,6 +446,7 @@ def handle_voice_command(cmd_type, match, text):
         return "I'm Jarvis, your AI assistant."
     return None
 from rag import search as rag_search, index_new_lines
+import jarvis_memory
 
 CHAT_DIR = os.path.expanduser("~/.local/share/jarvis/chats")
 ACTIVE_CHAT = os.path.expanduser("~/.local/share/jarvis/active_chat")
@@ -591,8 +592,6 @@ def _try_shell_command(text):
     if rest_words & _LANG_WORDS:
         return None
 
-    print(f"[ASK] Shell command detected: {text}", file=sys.stderr)
-
     # Send to terminal for visibility
     try:
         from pipeline import _send_to_terminal
@@ -620,15 +619,42 @@ def _try_shell_command(text):
 
 
 def ask(user_text, max_tokens=512, source="text", chat_id=""):
+    response = _ask_inner(user_text, max_tokens, source, chat_id)
+
+    # Record response in memory
+    if chat_id and response:
+        jarvis_memory.add_short_term(chat_id, "assistant", response)
+        # Update long-term every ~5 turns (check short-term length)
+        try:
+            mem = jarvis_memory.load(chat_id)
+            st_len = len(mem.get("short_term", []))
+            if st_len % 10 == 0:  # every 5 pairs (10 entries)
+                jarvis_memory.update_long_term(chat_id, user_text, response)
+        except Exception:
+            pass
+
+    return response
+
+
+def _ask_inner(user_text, max_tokens=512, source="text", chat_id=""):
+    # ═══════════════════════════════════════════════════════════════════
+    # MEMORY: load context, record user message
+    # ═══════════════════════════════════════════════════════════════════
+    memory_ctx = ""
+    if chat_id:
+        jarvis_memory.add_short_term(chat_id, "user", user_text)
+        memory_ctx = jarvis_memory.get_full_context(chat_id, max_short=8)
+
     # ═══════════════════════════════════════════════════════════════════
     # STAGE 1: INTENT CLASSIFICATION
     # ═══════════════════════════════════════════════════════════════════
-    intent = _classify_intent(user_text, source)
+    # Build context for intent classifier from memory
+    intent_ctx = {}
+    if chat_id:
+        intent_ctx = jarvis_memory.get_context_for_intent(chat_id)
+    intent = _classify_intent(user_text, source, context=intent_ctx)
     intent_type = intent.get("intent", "casual_chat")
     detected_lang = intent.get("language", "")
-    print(f"[ASK] Intent: {intent_type} | lang={detected_lang} | "
-          f"tools={intent.get('tools', [])} | multi_step={intent.get('is_multi_step', False)}",
-          file=sys.stderr)
 
     # ═══════════════════════════════════════════════════════════════════
     # STAGE 2: ROUTE BY INTENT
@@ -650,7 +676,6 @@ def ask(user_text, max_tokens=512, source="text", chat_id=""):
     # ── Shell command ──
     if intent_type == "shell_cmd":
         command = intent.get("parameters", {}).get("command", user_text)
-        print(f"[ASK] Shell command: {command}", file=sys.stderr)
         try:
             from pipeline import _send_to_terminal
             _send_to_terminal(f'echo "\\n\\033[1;33m[Jarvis] $ {command}\\033[0m"')
@@ -679,7 +704,6 @@ def ask(user_text, max_tokens=512, source="text", chat_id=""):
             from pentest import handle_pentest_request
             return handle_pentest_request(user_text)
         except Exception as e:
-            print(f"[ASK] Pentest error: {e}", file=sys.stderr)
             return f"Pentest error: {e}"
 
     # ── CVE query ──
@@ -722,7 +746,7 @@ def ask(user_text, max_tokens=512, source="text", chat_id=""):
             if results:
                 return f"## Security database: {len(results)} CVEs loaded\n\nAsk about a specific CVE."
         except Exception as e:
-            print(f"[ASK] Bridge error: {e}", file=sys.stderr)
+            pass
 
     # ── Code generation ──
     if intent_type == "code_gen":
@@ -731,11 +755,8 @@ def ask(user_text, max_tokens=512, source="text", chat_id=""):
             return "Generation stopped."
         try:
             from pipeline import run_pipeline
-            print(f"[ASK] Pipeline triggered for: {user_text[:80]}", file=sys.stderr)
             p = run_pipeline(user_text, detected_lang, chat_id=chat_id)
             resp = p.final_response
-            has_test = "**Test Result:**" in resp
-            print(f"[ASK] Pipeline done — confidence={p.confidence}%, has_test_output={has_test}", file=sys.stderr)
             lines = resp.split('\n')
             clean = []
             for line in lines:
@@ -751,8 +772,6 @@ def ask(user_text, max_tokens=512, source="text", chat_id=""):
             return '\n'.join(clean)
         except Exception as e:
             import traceback
-            print(f"[ASK] PIPELINE FAILED: {e}", file=sys.stderr)
-            traceback.print_exc()
 
     # ── Edit code ──
     if intent_type == "edit_code":
@@ -895,6 +914,9 @@ def ask(user_text, max_tokens=512, source="text", chat_id=""):
             )
         else:
             prompt = user_text
+        # Inject memory context
+        if memory_ctx:
+            prompt = f"{memory_ctx}\n\nUser: {user_text}"
         result = subprocess.run(
             ["curl", "-s", "--max-time", "120",
              "http://localhost:11434/api/chat",
