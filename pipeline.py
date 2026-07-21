@@ -1872,6 +1872,8 @@ def _exec_generate_tests(p: Pipeline, language: str, code: str, task: str,
             "Write a Python test that uses subprocess to run tmp/pipeline_run.py with "
             "sample arguments, captures stdout/stderr, and asserts expected output. "
             "Use exit(1) on failure (NOT sys.exit), print(\"PASS\") on success. "
+            "Always print the command you ran and the actual output before PASS/FAIL. "
+            "Example format: print(f'Ran: {cmd}') then print(f'Output: {output}') then PASS/FAIL. "
             "Test edge cases: empty input, valid input, invalid input. "
             "Do NOT import from the module directly — always use subprocess.run()."
         )
