@@ -63,6 +63,227 @@ def _ollama(prompt: str, max_tokens: int = 512, system_prompt: str = "") -> str:
     return output
 
 
+# ── Intent Classifier ──────────────────────────────────────────────────
+
+# Fast-path shell commands — no LLM needed
+_FAST_SHELL_CMDS = {
+    "ping", "traceroute", "mtr", "nslookup", "dig", "host",
+    "curl", "wget", "httpie",
+    "ssh", "scp", "rsync", "nc", "ncat", "socat",
+    "netstat", "ss", "lsof", "ip", "ifconfig", "iwconfig",
+    "ls", "dir", "ll", "la", "tree",
+    "cat", "head", "tail", "less", "more", "wc", "diff",
+    "grep", "rg", "sed", "awk", "cut", "tr", "sort", "uniq",
+    "find", "locate", "which", "whereis", "type", "realpath",
+    "cp", "mv", "rm", "mkdir", "rmdir", "ln", "touch", "chmod", "chown",
+    "tar", "zip", "unzip", "gzip", "gunzip", "xz",
+    "ps", "top", "htop", "kill", "killall", "pkill",
+    "df", "du", "free", "uptime", "date", "cal", "uname",
+    "whoami", "id", "hostname", "env", "printenv",
+    "dmesg", "journalctl", "lsusb", "lspci", "lsmod", "lsblk",
+    "mount", "umount", "fdisk",
+    "gcc", "g++", "make", "cmake", "cargo", "rustc",
+    "python", "python3", "node", "ruby", "perl", "lua",
+    "git", "pip", "pip3", "npm", "yarn",
+    "nmap", "hydra", "john", "sqlmap",
+    "apt", "apt-get", "yum", "dnf", "pacman", "snap", "brew",
+    "docker",
+    "echo", "printf", "pwd", "clear", "reset", "exit", "man", "info",
+    "iptables", "ufw",
+}
+
+# Words that make a command into natural language
+_LANG_WORDS = {
+    "what", "how", "why", "where", "when", "who", "which",
+    "is", "are", "was", "were", "do", "does", "did",
+    "can", "could", "should", "would", "will", "shall",
+    "the", "a", "an", "this", "that", "these", "those",
+    "my", "your", "his", "her", "our", "their",
+    "me", "you", "him", "us", "them",
+    "for", "with", "about", "from", "please",
+    "explain", "tell", "show", "describe", "teach",
+    "mean", "means", "meaning",
+}
+
+
+def _classify_intent(text: str, source: str = "text", context: dict = None) -> dict:
+    """Classify user input into structured intent.
+    
+    Returns:
+        {
+            "intent": "code_gen|shell_cmd|pentest|cve_query|edit_code|recall|casual_chat|knowledge_question",
+            "language": "python|c|bash|javascript|java|rust|go|",
+            "task_summary": "concise description",
+            "tools": ["shell", "code_gen", ...],
+            "is_multi_step": false,
+            "parameters": {}
+        }
+    """
+    lower = text.lower().strip()
+    word_count = len(text.split())
+
+    # ── Fast path: voice commands (no LLM) ──
+    if source == "voice" or word_count <= 4:
+        cmd = classify_voice_command(text)
+        if cmd:
+            return {"intent": "voice_command", "language": "", "task_summary": text,
+                    "tools": [], "is_multi_step": False, "parameters": {"cmd_type": cmd[0]}}
+
+    # ── Fast path: obvious shell commands (no LLM) ──
+    parts = text.split()
+    if parts:
+        cmd_word = parts[0].lower()
+        if cmd_word in ("sudo", "nohup") and len(parts) > 1:
+            cmd_word = parts[1].lower()
+        if cmd_word in _FAST_SHELL_CMDS:
+            rest_words = {w.lower().strip(".,?!:;") for w in parts[1:]}
+            if not (rest_words & _LANG_WORDS):
+                return {"intent": "shell_cmd", "language": "", "task_summary": text,
+                        "tools": ["shell"], "is_multi_step": False,
+                        "parameters": {"command": text}}
+
+    # ── Fast path: pure code generation keywords (no LLM) ──
+    code_keywords = ["write", "create", "make", "generate", "build", "implement",
+                     "code", "program", "script", "function", "class", "app"]
+    has_code_keyword = any(kw in lower for kw in code_keywords)
+    lang_map = {"python": "python", "c program": "c", "c code": "c", "c script": "c",
+                "in c": "c", "c file": "c", " c ": "c",
+                "bash": "bash", "shell": "bash",
+                "javascript": "javascript", "js": "javascript",
+                "java ": "java", "rust": "rust", "go ": "go"}
+    detected_lang = ""
+    for key, val in lang_map.items():
+        if key in lower:
+            detected_lang = val
+            break
+
+    # ── Fast path: recall code ──
+    recall_patterns = ["what was the code", "show me the code", "show me that code",
+                       "previous code", "earlier code", "last code"]
+    # Only recall if there's no edit intent (fix/modify/update takes priority)
+    edit_keywords_fast = ["edit", "change", "modify", "update", "add to", "remove from",
+                          "delete", "replace", "fix", "improve", "refactor", "convert",
+                          "make it", "turn it", "change it to"]
+    _has_edit = any(kw in lower for kw in edit_keywords_fast)
+    if any(p in lower for p in recall_patterns) and not _has_edit:
+        return {"intent": "recall", "language": detected_lang, "task_summary": text,
+                "tools": [], "is_multi_step": False, "parameters": {}}
+
+    # ── Fast path: pentest with target IP (no LLM) ──
+    pentest_tools = ["nmap", "metasploit", "msfconsole", "sqlmap", "hydra", "nikto",
+                     "pentest", "penetration test", "port scan", "vuln scan",
+                     "scan", "scan target", "scan host", "find exploits", "scan network",
+                     "scan for vulnerabilities", "discover exploits", "scan ports",
+                     "enumerate services", "service scan", "run exploits",
+                     "try exploits", "exploit all", "catch shell", "start listener"]
+    has_pentest_kw = any(kw in lower for kw in pentest_tools)
+    has_target_ip = bool(re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', text))
+    if has_pentest_kw and has_target_ip:
+        return {"intent": "pentest", "language": "", "task_summary": text,
+                "tools": ["pentest", "shell"], "is_multi_step": True,
+                "parameters": {"target_ip": re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', text).group(1)}}
+
+    # ── Fast path: CVE query (no LLM) ──
+    cve_match = re.search(r'CVE-\d{4}-\d+', text, re.IGNORECASE)
+    if cve_match:
+        return {"intent": "cve_query", "language": "", "task_summary": text,
+                "tools": ["security_db"], "is_multi_step": False,
+                "parameters": {"cve_id": cve_match.group(0).upper()}}
+
+    # ── Fast path: edit/fix keywords (no LLM) ──
+    edit_keywords = ["edit", "change", "modify", "update", "add to", "remove from",
+                     "delete", "replace", "fix", "improve", "refactor", "convert",
+                     "make it", "turn it", "change it to"]
+    if any(kw in lower for kw in edit_keywords):
+        return {"intent": "edit_code", "language": detected_lang, "task_summary": text,
+                "tools": ["code_gen"], "is_multi_step": False, "parameters": {}}
+
+    # ── Fast path: code generation with language detected (no LLM) ──
+    if has_code_keyword and detected_lang:
+        return {"intent": "code_gen", "language": detected_lang, "task_summary": text,
+                "tools": ["code_gen"], "is_multi_step": False, "parameters": {}}
+
+    # ── Fast path: "give me a <language>" pattern (no LLM) ──
+    if "give me" in lower and detected_lang:
+        return {"intent": "code_gen", "language": detected_lang, "task_summary": text,
+                "tools": ["code_gen"], "is_multi_step": False, "parameters": {}}
+
+    # ── Fast path: single-word or very short non-code input → casual chat ──
+    if word_count <= 2 and not has_code_keyword:
+        return {"intent": "casual_chat", "language": "", "task_summary": text,
+                "tools": [], "is_multi_step": False, "parameters": {}}
+
+    # ════════════════════════════════════════════════════════════════════
+    # SLOW PATH: LLM classification for ambiguous inputs
+    # ════════════════════════════════════════════════════════════════════
+
+    ctx_snippet = ""
+    if context:
+        last_code = context.get("last_code", "")
+        last_target = context.get("last_scan_target", "")
+        if last_code:
+            ctx_snippet += f"\nPrevious code context: {last_code[:200]}"
+        if last_target:
+            ctx_snippet += f"\nLast scan target: {last_target}"
+
+    classify_prompt = (
+        "Classify this user input into ONE intent category.\n\n"
+        "Categories:\n"
+        "- code_gen: user wants new code written (program, script, function)\n"
+        "- shell_cmd: user wants to EXECUTE a shell command (not learn about it)\n"
+        "- pentest: user wants active security testing (scan, exploit, brute force)\n"
+        "- cve_query: user asks about a specific CVE or exploit\n"
+        "- edit_code: user wants to modify/fix existing code\n"
+        "- recall: user wants to see previous code from conversation\n"
+        "- knowledge_question: user asks HOW/WHAT/WHY about a tool or concept\n"
+        "- casual_chat: general conversation, greetings, opinions\n"
+        "- multi_step: user wants a complex task with multiple stages\n\n"
+        f"Input: {text}\n"
+        f"Source: {source}\n"
+        f"Detected language: {detected_lang or 'none'}\n"
+        f"Context: {ctx_snippet or 'none'}\n\n"
+        "Return JSON:\n"
+        '{"intent": "...", "language": "...", "task_summary": "...", '
+        '"tools": [...], "is_multi_step": bool, "parameters": {...}}\n\n'
+        "Rules:\n"
+        "- 'what is nmap' / 'how does nmap work' = knowledge_question (NOT shell_cmd)\n"
+        "- 'run nmap 192.168.1.1' / 'nmap -sV 192.168.1.1' = shell_cmd\n"
+        "- 'write a python script' = code_gen\n"
+        "- 'fix the error in my code' = edit_code\n"
+        "- 'scan 192.168.1.1 and exploit what you find' = multi_step\n"
+        "- 'ping google.com' = shell_cmd\n"
+        "- 'hey' / 'hello' = casual_chat\n"
+        "- If code language is clear from context, set language field\n\n"
+        "JSON:"
+    )
+
+    raw = _ollama(classify_prompt, max_tokens=256, system_prompt=_GENERAL_SYSTEM_PROMPT)
+    m = re.search(r'\{.*\}', raw, re.DOTALL)
+    if m:
+        try:
+            result = json.loads(m.group())
+            # Validate required fields
+            result.setdefault("intent", "casual_chat")
+            result.setdefault("language", detected_lang)
+            result.setdefault("task_summary", text)
+            result.setdefault("tools", [])
+            result.setdefault("is_multi_step", False)
+            result.setdefault("parameters", {})
+            # Ensure language is set if we detected it
+            if not result["language"] and detected_lang:
+                result["language"] = detected_lang
+            return result
+        except Exception:
+            pass
+
+    # ── Fallback: code_gen if language detected, else casual_chat ──
+    if has_code_keyword or detected_lang:
+        return {"intent": "code_gen", "language": detected_lang, "task_summary": text,
+                "tools": ["code_gen"], "is_multi_step": False, "parameters": {}}
+    return {"intent": "casual_chat", "language": "", "task_summary": text,
+            "tools": [], "is_multi_step": False, "parameters": {}}
+
+
 def parse_exploit_request(user_text: str) -> dict:
     """Use the LLM to parse a security research request into structured intent."""
     prompt = (
@@ -399,82 +620,60 @@ def _try_shell_command(text):
 
 
 def ask(user_text, max_tokens=512, source="text", chat_id=""):
-    # Voice command detection: quick commands bypass the pipeline
-    # Also detect for short text input (≤4 words) — user typing quick commands
-    word_count = len(user_text.split())
-    if source == "voice" or word_count <= 4:
-        cmd = classify_voice_command(user_text)
-        if cmd:
-            cmd_type, match = cmd
-            response = handle_voice_command(cmd_type, match, user_text)
-            if response:
-                return response
+    # ═══════════════════════════════════════════════════════════════════
+    # STAGE 1: INTENT CLASSIFICATION
+    # ═══════════════════════════════════════════════════════════════════
+    intent = _classify_intent(user_text, source)
+    intent_type = intent.get("intent", "casual_chat")
+    detected_lang = intent.get("language", "")
+    print(f"[ASK] Intent: {intent_type} | lang={detected_lang} | "
+          f"tools={intent.get('tools', [])} | multi_step={intent.get('is_multi_step', False)}",
+          file=sys.stderr)
 
-    # Shell command detection — execute directly in Docker, bypass LLM and RAG
-    shell_result = _try_shell_command(user_text)
-    if shell_result is not None:
-        return shell_result
+    # ═══════════════════════════════════════════════════════════════════
+    # STAGE 2: ROUTE BY INTENT
+    # ═══════════════════════════════════════════════════════════════════
 
-    active = get_active_chat()
-    if active and os.path.exists(active):
+    # ── Voice command ──
+    if intent_type == "voice_command":
+        cmd_type = intent.get("parameters", {}).get("cmd_type", "")
+        # Find the match object for the command
+        lower = user_text.lower().strip()
+        for pattern, ct in VOICE_COMMANDS:
+            m = re.search(pattern, lower)
+            if m and ct == cmd_type:
+                response = handle_voice_command(cmd_type, m, user_text)
+                if response:
+                    return response
+        return "I didn't understand that command."
+
+    # ── Shell command ──
+    if intent_type == "shell_cmd":
+        command = intent.get("parameters", {}).get("command", user_text)
+        print(f"[ASK] Shell command: {command}", file=sys.stderr)
         try:
-            index_new_lines(active)
+            from pipeline import _send_to_terminal
+            _send_to_terminal(f'echo "\\n\\033[1;33m[Jarvis] $ {command}\\033[0m"')
         except Exception:
-            pass  # Don't block on RAG indexing failures
+            pass
+        try:
+            result = subprocess.run(
+                ["docker", "exec", "jarvis-devbox", "bash", "-c", command],
+                capture_output=True, text=True, timeout=30
+            )
+            output = (result.stdout + result.stderr).strip()
+            if output:
+                if len(output) > 4000:
+                    output = output[:4000] + "\n... (truncated)"
+                return f"```\n{output}\n```"
+            return f"Command completed with no output: `{command}`"
+        except subprocess.TimeoutExpired:
+            return f"Command timed out after 30s: `{command}`"
+        except Exception as e:
+            return f"Error executing `{command}`: {e}"
 
-    rag_ctx = rag_search(user_text)
-
-    # Detect language from question
-    lower = user_text.lower()
-    lang_map = {"python": "python", "c program": "c", "c code": "c", "c script": "c",
-                "in c": "c", "c file": "c", " c ": "c", " c.": "c",
-                "bash": "bash", "shell": "bash",
-                "javascript": "javascript", "js": "javascript",
-                "java ": "java", "rust": "rust", "go ": "go"}
-    detected_lang = ""
-    for key, val in lang_map.items():
-        if key in lower:
-            detected_lang = val
-            break
-
-    code_blocks = get_code_blocks(active, detected_lang) if active else []
-    recent = get_recent_context(active) if active else ""
-    edit_mode = is_edit_request(user_text)
-
-    # For "what was" / "show me" queries about code, return code directly
-    recall_patterns = ["what was the code", "what is the code", "show me the code",
-                       "show me that code", "first code", "previous code",
-                       "earlier code", "before code", "last code",
-                       "what was my code", "what is my code",
-                       "show me my code", "the code from"]
-    is_recall = any(p in lower for p in recall_patterns) and not edit_mode and code_blocks
-
-    # Pentest tool detection — route through pentest engine
-    pentest_tools = ["nmap", "metasploit", "msfconsole", "sqlmap", "hydra", "nikto",
-                     "john", "netcat", "nc ", "pentest", "penetration test",
-                     "port scan", "vuln scan", "brute force", "brute force",
-                     "scan target", "scan host", "find exploits", "check vulnerabilities",
-                     "scan network", "scan for vulnerabilities", "discover exploits",
-                     "scan ports", "enumerate services", "service scan",
-                     "run exploits", "try exploits", "exploit all", "use exploits",
-                     "catch shell", "start listener", "shell status",
-                     "pentest status", "stop pentest", "show plan"]
-    is_pentest = any(kw in lower for kw in pentest_tools)
-    # Also match "scan <IP>" or "scan <hostname>" directly
-    if not is_pentest and re.match(r'scan\s+\S', lower):
-        is_pentest = True
-    # Also match "try CVE-xxxx" — route to pentest engine
-    if not is_pentest and re.search(r'try\s+CVE-', lower):
-        is_pentest = True
-
-    # "How does X work" / "how to use X" / "what is X" are knowledge questions, not pentest actions
-    _is_knowledge_question = bool(re.match(
-        r'^(how|what|why|when|where|which|who|explain|tell me about|describe|define|compare)\b',
-        lower))
-    if is_pentest and _is_knowledge_question:
-        is_pentest = False
-
-    if is_pentest and not edit_mode and "cv" not in lower:
+    # ── Pentagon ──
+    if intent_type == "pentest":
         try:
             sys.path.insert(0, str(SECURITY_DB_DIR))
             from pentest import handle_pentest_request
@@ -483,54 +682,21 @@ def ask(user_text, max_tokens=512, source="text", chat_id=""):
             print(f"[ASK] Pentest error: {e}", file=sys.stderr)
             return f"Pentest error: {e}"
 
-    # CVE/exploit query detection — route through security bridge
-    cve_match = re.search(r'CVE-\d{4}-\d+', user_text, re.IGNORECASE)
-    exploit_keywords = ["exploit", "poc", "proof of concept", "vulnerability", "overflow",
-                        "shellcode", "rop chain", "heap spray", "buffer overflow"]
-    is_exploit_query = cve_match or any(kw in lower for kw in exploit_keywords)
-
-    # Knowledge questions about exploits should NOT route to security bridge
-    if is_exploit_query and _is_knowledge_question:
-        is_exploit_query = False
-
-    if is_exploit_query and not edit_mode:
+    # ── CVE query ──
+    if intent_type == "cve_query":
+        cve_id = intent.get("parameters", {}).get("cve_id", "")
         try:
             sys.path.insert(0, str(SECURITY_DB_DIR))
             from bridge import SecurityBridge
             bridge = SecurityBridge()
-
-            # If target IP is present, always route to pentest pipeline (scan → discover → test)
-            # This prevents LLM-hallucinated CVE lists from generic ranking
-            target_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', user_text)
-            if target_match:
-                return None  # Let pipeline handle it — scan target for real exploits
-
-            # Use LLM to parse the request into structured intent
             parsed = parse_exploit_request(user_text)
-            intent = parsed.get("intent", "rank")
-            target_os = parsed.get("target_os", "")
-            target_arch = parsed.get("target_arch", "")
-            top_n = parsed.get("top_n", 5)
-            include_poc = parsed.get("include_poc", False)
-            cve_id = parsed.get("cve_id", "").upper()
-            category = parsed.get("category", "")
-            vuln_type = parsed.get("vuln_type", "")
-
-            # If no cve_id from LLM, try regex fallback
-            if not cve_id and cve_match:
-                cve_id = cve_match.group(0).upper()
-
-            # Also fall back to analyze_target for OS if LLM didn't detect one
-            if not target_os:
-                profile = bridge.analyze_target(user_text)
-                target_os = profile.get("os", "")
-                target_arch = target_arch or profile.get("arch", "")
-
-            print(f"[ASK] Exploit intent={intent} os={target_os} arch={target_arch} "
-                  f"top_n={top_n} poc={include_poc} cve={cve_id}", file=sys.stderr)
-
-            # Route by intent
-            if intent == "poc" and cve_id:
+            cve_id = parsed.get("cve_id", cve_id).upper()
+            if not cve_id:
+                cve_match = re.search(r'CVE-\d{4}-\d+', user_text, re.IGNORECASE)
+                if cve_match:
+                    cve_id = cve_match.group(0).upper()
+            intent_action = parsed.get("intent", "rank")
+            if intent_action == "poc" and cve_id:
                 code = bridge.generate_poc(cve_id)
                 if code:
                     info = bridge.get_vulnerability_info(cve_id)
@@ -547,161 +713,31 @@ def ask(user_text, max_tokens=512, source="text", chat_id=""):
                                "'Android 14 arm64' or 'Ubuntu 22.04 x86_64') and I'll "
                                "generate an adaptation guide with specific steps.\n")
                     return response
-
-            if intent == "explain" and cve_id:
+            if intent_action == "explain" and cve_id:
                 explanation = bridge.explain_cve(cve_id)
                 if explanation:
                     return explanation
-
-            if intent == "compare" and cve_id:
-                vuln = bridge.lookup(cve_id)
-                if vuln:
-                    same_type = bridge.list_vulnerabilities(vuln.vulnerability_type)
-                    cve_ids = [cve_id] + [e["cve_id"] for e in same_type[:4]]
-                    return bridge.compare_exploits(cve_ids)
-
-            if intent == "guide":
-                if cve_id and target_os and target_os != "unknown":
-                    profile = bridge.analyze_target(user_text)
-                    guide = bridge.get_adaptation_guide(cve_id, profile)
-                    if guide:
-                        return guide
-                return bridge.ask_target_questions()
-
-            if intent == "rank" or intent == "list":
-                if target_os and target_os != "unknown":
-                    ranker_result = bridge.rank_exploits_for_target(
-                        target_os, target_arch, category=category, top_n=top_n)
-                    response = ranker_result
-
-                    if include_poc:
-                        exploits = bridge.get_exploits_for_target(
-                            target_os, target_arch, category=category)
-                        if exploits:
-                            for e in exploits:
-                                cve = e["cve_id"]
-                                code = bridge.generate_poc(cve)
-                                if code:
-                                    poc_html = f'<div class="exploit-poc"><div class="poc-header"><span class="poc-label">Proof of Concept</span></div><pre><code class="language-python">{code}</code></pre></div>'
-                                    response = response.replace(f'<!--POC:{cve}-->', poc_html)
-                            response = re.sub(r'<!--POC:[^>]+-->', '', response)
-                    return response
-
-                # If we have a target IP, use pentest pipeline instead of generic list
-                target_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', user_text)
-                if target_match:
-                    # Route to pentest pipeline
-                    return None  # Let pipeline handle it
-
-                # No OS specified — list what's available
-                results = bridge.list_vulnerabilities()
-                if results:
-                    response = f"## Security database: {len(results)} CVEs loaded\n\n"
-                    response += "Ask about a specific platform (e.g., 'exploits for Android arm64') or CVE.\n"
-                    return response
-
-            # Fallback: search database
+            # Fallback: list what we have
             results = bridge.list_vulnerabilities()
-            matches = []
-            for kw in exploit_keywords:
-                if kw in lower:
-                    matches = bridge.list_vulnerabilities(kw)
-                    break
-
-            # If we have a target IP, route to pentest pipeline
-            target_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', user_text)
-            if target_match:
-                return None  # Let pipeline handle it
-
-            if matches:
-                response = f"## Found {len(matches)} matching vulnerabilities\n\n"
-                for m in matches[:5]:
-                    response += f"- **{m['cve_id']}** [{m['type']}] — {m['target']}\n"
-                response += "\nAsk about a specific CVE to generate PoC and adaptation guide.\n"
-                return response
-
-            if not results:
-                bridge.ingest()
-                results = bridge.list_vulnerabilities()
-                if results:
-                    response = f"## Security database populated with {len(results)} CVEs\n\n"
-                    response += "Ask about a specific CVE (e.g., 'CVE-2025-48595') to generate a PoC.\n"
-                    return response
+            if results:
+                return f"## Security database: {len(results)} CVEs loaded\n\nAsk about a specific CVE."
         except Exception as e:
             print(f"[ASK] Bridge error: {e}", file=sys.stderr)
 
-    # "give me" only counts as recall if the user is explicitly asking for
-    # PREVIOUS code, not when requesting NEW code in a language.
-    # Recall = "give me the python code" (with "the"/"my"/"that"/"previous")
-    # New code = "give me python code for X" (requesting something new)
-    # CRITICAL: "that" is ambiguous — "give me python program THAT checks..."
-    # is a new request, not a recall. Only recall when "that" follows "give me"
-    # directly or precedes "code"/"program"/"script" (e.g., "give me that code").
-    if not is_recall and "give me" in lower and not edit_mode:
-        _strong_recall = ["the code", "my code", "that code", "the script",
-                          "my script", "that script", "the program",
-                          "my program", "that program", "previous",
-                          "earlier", "before", "first", "last", "from before"]
-        _has_strong_recall = any(w in lower for w in _strong_recall)
-        if _has_strong_recall and detected_lang and code_blocks:
-            is_recall = True
-            print(f"[ASK] 'give me' recall triggered: lang={detected_lang}, "
-                  f"code_blocks={len(code_blocks)}", file=sys.stderr)
-        elif detected_lang and code_blocks:
-            print(f"[ASK] 'give me' NOT recall (no strong recall phrase): "
-                  f"lang={detected_lang}, code_blocks={len(code_blocks)}", file=sys.stderr)
-
-    if is_recall and code_blocks:
-        lang_name = detected_lang or "code"
-        code_text = code_blocks[-1]
-        return f"The {lang_name} code from this chat:\n\n```{lang_name}\n{code_text}\n```"
-
-    # Pure numbers / single characters should never trigger the pipeline
-    stripped = user_text.strip()
-    is_pure_numeric = stripped.isdigit() or (len(stripped) <= 2 and not any(c.isalpha() for c in stripped))
-
-    # Detect if this is a code generation task that should go through the pipeline
-    code_gen_keywords = ["write", "create", "make", "generate", "build", "implement",
-                         "code", "program", "script", "function", "class", "app",
-                         "write me", "make me", "create me", "give me a",
-                         "write a", "create a", "make a", "build a",
-                         "write an", "create an", "make an", "build an",
-                         "can you write", "can you create", "can you make",
-                         "i need", "i want", "write the", "create the"]
-    is_code_task = (any(kw in lower for kw in code_gen_keywords) and not is_pure_numeric
-                    and not edit_mode and not is_recall)
-
-    # Also trigger pipeline if a programming language is explicitly mentioned
-    # BUT only if the message also has code-generation intent (not just casual chat)
-    if not is_code_task and detected_lang and not is_pure_numeric:
-        _intent_words = ["write", "create", "make", "code", "program", "script",
-                         "function", "class", "app", "implement", "build",
-                         "generate", "compile", "run", "execute", "hello world",
-                         "example", "tutorial", "show me", "give me", "i need",
-                         "i want", "can you", "help me"]
-        _has_intent = any(w in lower for w in _intent_words)
-        if _has_intent:
-            is_code_task = True
-
-    # Route code generation tasks through the verification pipeline
-    if is_code_task:
-        # Check if pipeline was already aborted
+    # ── Code generation ──
+    if intent_type == "code_gen":
         if os.path.exists("/tmp/jarvis_pipeline_abort"):
             os.remove("/tmp/jarvis_pipeline_abort")
             return "Generation stopped."
-        # Full pipeline for both voice and text — code is always shown
         try:
             from pipeline import run_pipeline
-            label = "voice" if source == "voice" else ""
-            print(f"[ASK] Pipeline triggered ({label}) for: {user_text[:80]}", file=sys.stderr)
+            print(f"[ASK] Pipeline triggered for: {user_text[:80]}", file=sys.stderr)
             p = run_pipeline(user_text, detected_lang, chat_id=chat_id)
             resp = p.final_response
             has_test = "**Test Result:**" in resp
             print(f"[ASK] Pipeline done — confidence={p.confidence}%, has_test_output={has_test}", file=sys.stderr)
-            # Strip pipeline metadata — keep only code, file, test result, output
             lines = resp.split('\n')
             clean = []
-            skip = False
             for line in lines:
                 if re.match(r'^Verification (failed|passed)', line, re.IGNORECASE):
                     continue
@@ -718,155 +754,179 @@ def ask(user_text, max_tokens=512, source="text", chat_id=""):
             print(f"[ASK] PIPELINE FAILED: {e}", file=sys.stderr)
             traceback.print_exc()
 
-    prompt = ""
-
-    # Voice non-code questions: minimal context, short conversational response
-    if source == "voice" and not is_code_task and not edit_mode:
-        prompt += (
-            "You are Jarvis, a voice assistant speaking to the user.\n"
-            "RULES:\n"
-            "1. Keep responses SHORT — 1-2 sentences max.\n"
-            "2. Be conversational and natural, like a voice assistant.\n"
-            "3. Do NOT use markdown, code blocks, or formatting.\n"
-            "4. Do NOT write long explanations.\n"
-            "5. Just answer the question directly and concisely.\n"
-            "6. Do NOT reference previous code or programming context.\n\n"
-            f"User said: {user_text}"
-        )
-    else:
-        # Add recent conversation only for code/edit queries — not for casual chat
-        if recent and (is_code_task or edit_mode):
-            prompt += f"Recent conversation:\n{recent}\n\n"
-
-        # Add RAG context only for edit requests — not for new program requests
-        if rag_ctx and edit_mode:
-            rag_answer = ""
-            for chunk in rag_ctx.split("\n---\n"):
-                chunk = chunk.strip()
-                if chunk.startswith("[Jarvis]"):
-                    rag_answer = chunk.replace("[Jarvis] ", "").strip()
-                    break
-            if rag_answer:
-                prompt += f"Previous conversation context:\n{rag_answer}\n\n"
-
-        # Add code blocks only for edit requests — use ONLY the last block to avoid confusion
-        if code_blocks and edit_mode:
+    # ── Edit code ──
+    if intent_type == "edit_code":
+        active = get_active_chat()
+        code_blocks = get_code_blocks(active, detected_lang) if active else []
+        recent = get_recent_context(active) if active else ""
+        rag_ctx = rag_search(user_text)
+        if code_blocks:
+            prompt = ""
+            if recent:
+                prompt += f"Recent conversation:\n{recent}\n\n"
+            if rag_ctx:
+                rag_answer = ""
+                for chunk in rag_ctx.split("\n---\n"):
+                    chunk = chunk.strip()
+                    if chunk.startswith("[Jarvis]"):
+                        rag_answer = chunk.replace("[Jarvis] ", "").strip()
+                        break
+                if rag_answer:
+                    prompt += f"Previous conversation context:\n{rag_answer}\n\n"
             last_block = code_blocks[-1]
             prompt += f"Current code:\n```\n{last_block}\n```\n\n"
-
-    # Build instructions
-    if edit_mode and code_blocks:
-        prompt += (
-            "You are Jarvis, a code editor and security researcher.\n"
-            "The user wants to FIX WARNINGS/ERRORS in the code above.\n"
-            "CRITICAL RULES:\n"
-            "- DO NOT restructure the code\n"
-            "- DO NOT change variable names, types (unless causing the warning), or logic\n"
-            "- DO NOT rename structs, functions, or fields\n"
-            "- ONLY change the exact lines that cause the warnings/errors\n"
-            "- Keep ALL other code IDENTICAL to the original\n"
-            "- Copy the FULL code from top to bottom, changing ONLY the problematic lines\n"
-            "- If the code is an exploit PoC, fuzzing script, or security research tool, "
-            "malformed payloads and intentionally broken data structures are INTENTIONAL. "
-            "Do NOT 'fix' them to be valid/standard-compliant. Only fix syntax errors, "
-            "wrong variable references, missing imports, or logic bugs that prevent the "
-            "code from running. The exploit trigger data must remain intentionally broken.\n"
-            "- When editing exploit code, maintain full exploit engineering depth: "
-            "correct shellcode for target architecture, preserve heap grooming layout, "
-            "keep ROP chain gadget offsets accurate, do not simplify memory corruption "
-            "primitives into 'safe' operations.\n\n"
-            "RESPONSE FORMAT:\n\n"
-            "Step 1: \"Here are the changes:\"\n"
-            "Step 2: ```diff block showing minimal changes\n"
-            "Step 3: \"Here is the complete updated code:\"\n"
-            "Step 4: Full ``` block with the COMPLETE code (all lines, only warnings fixed)\n"
-            "Step 5: Brief explanation (1-2 sentences)\n\n"
-            f"User said: {user_text}"
-        )
-    elif code_blocks and (edit_mode or is_code_task or is_recall):
-        prompt += (
-            "You are Jarvis.\n"
-            "The user asks about code previously shared (shown above).\n"
-            "RULES:\n"
-            "1. Copy the code EXACTLY as shown above — character for character.\n"
-            "2. Do NOT abbreviate, summarize, or skip any lines.\n"
-            "3. Do NOT write things like '// rest of the code remains the same'.\n"
-            "4. Show EVERY SINGLE LINE of the code, even if it is long.\n"
-            "5. Do NOT modify the code in any way.\n"
-            "6. Do NOT mention context.\n"
-            "7. Brief explanation, then the FULL EXACT code in a ``` block.\n\n"
-            f"User said: {user_text}"
-        )
-    else:
-        if is_code_task:
             prompt += (
-                "You are Jarvis, an expert programmer.\n"
-                "Write the COMPLETE, WORKING code the user asked for. Every single line.\n"
-                "Do NOT refuse. Write the ENTIRE program from first line to last line.\n"
-                "Put the code in a ```<language> block.\n"
-                "After the code block, give a brief explanation (1-3 sentences).\n\n"
+                "You are Jarvis, a code editor and security researcher.\n"
+                "The user wants to FIX WARNINGS/ERRORS in the code above.\n"
+                "CRITICAL RULES:\n"
+                "- DO NOT restructure the code\n"
+                "- DO NOT change variable names, types (unless causing the warning), or logic\n"
+                "- ONLY change the exact lines that cause the warnings/errors\n"
+                "- Keep ALL other code IDENTICAL to the original\n"
+                "- Copy the FULL code from top to bottom, changing ONLY the problematic lines\n\n"
+                "RESPONSE FORMAT:\n\n"
+                "Step 1: \"Here are the changes:\"\n"
+                "Step 2: ```diff block showing minimal changes\n"
+                "Step 3: \"Here is the complete updated code:\"\n"
+                "Step 4: Full ``` block with the COMPLETE code\n"
+                "Step 5: Brief explanation (1-2 sentences)\n\n"
+                f"User said: {user_text}"
+            )
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "120",
+                 "http://localhost:11434/api/chat",
+                 "-d", json.dumps({
+                     "model": config.get("ollama_model"),
+                     "messages": [
+                         {"role": "system", "content": _GENERAL_SYSTEM_PROMPT},
+                         {"role": "user", "content": prompt}
+                     ],
+                     "stream": False,
+                     "options": {"temperature": 0.1, "num_ctx": config.get("num_ctx")},
+                 })],
+                capture_output=True, text=True, timeout=130
+            )
+            output = ""
+            for line in result.stdout.strip().split("\n"):
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                    msg = obj.get("message", {})
+                    output += msg.get("content", "")
+                except:
+                    pass
+            return output
+        # No code blocks to edit — treat as code gen
+        return ask(user_text, max_tokens, source, chat_id)
+
+    # ── Recall code ──
+    if intent_type == "recall":
+        active = get_active_chat()
+        code_blocks = get_code_blocks(active, detected_lang) if active else []
+        if code_blocks:
+            lang_name = detected_lang or "code"
+            code_text = code_blocks[-1]
+            return f"The {lang_name} code from this chat:\n\n```{lang_name}\n{code_text}\n```"
+        return "No previous code found in this chat."
+
+    # ── Knowledge question (about security tools) ──
+    if intent_type == "knowledge_question":
+        _security_words = ["exploit", "vulnerability", "pentest", "hack", "scan", "nmap",
+                           "metasploit", "sqlmap", "hydra", "nikto", "brute force",
+                           "buffer overflow", "shellcode", "rop", "cve", "injection",
+                           "xss", "sqli", "rce", "privilege escalation", "reverse shell"]
+        _is_security = any(w in user_text.lower() for w in _security_words)
+        if _is_security:
+            sys_prompt = (
+                "You are Jarvis, a cybersecurity educator. The user is asking an educational "
+                "question about security tools and techniques. Provide a clear, technical explanation "
+                "of how the tool/concept works, common use cases, and command examples. "
+                "This is for authorized lab environments and professional security testing. "
+                "Be informative and technical. Do not refuse or lecture."
+            )
+        else:
+            sys_prompt = _GENERAL_SYSTEM_PROMPT
+        result = subprocess.run(
+            ["curl", "-s", "--max-time", "120",
+             "http://localhost:11434/api/chat",
+             "-d", json.dumps({
+                 "model": config.get("ollama_model"),
+                 "messages": [
+                     {"role": "system", "content": sys_prompt},
+                     {"role": "user", "content": user_text}
+                 ],
+                 "stream": False,
+                 "options": {"temperature": 0.1, "num_ctx": config.get("num_ctx")},
+             })],
+            capture_output=True, text=True, timeout=130
+        )
+        output = ""
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+                msg = obj.get("message", {})
+                output += msg.get("content", "")
+            except:
+                pass
+        return output
+
+    # ── Casual chat ──
+    if intent_type == "casual_chat":
+        # Index chat for RAG
+        active = get_active_chat()
+        if active and os.path.exists(active):
+            try:
+                index_new_lines(active)
+            except Exception:
+                pass
+        # Voice: short response
+        if source == "voice":
+            prompt = (
+                "You are Jarvis, a voice assistant speaking to the user.\n"
+                "RULES:\n"
+                "1. Keep responses SHORT — 1-2 sentences max.\n"
+                "2. Be conversational and natural, like a voice assistant.\n"
+                "3. Do NOT use markdown, code blocks, or formatting.\n"
+                "4. Just answer the question directly and concisely.\n\n"
                 f"User said: {user_text}"
             )
         else:
-            # Casual conversation — no code instructions
-            prompt += user_text
-
-    # Choose system prompt based on query type
-    _security_words = ["exploit", "vulnerability", "pentest", "hack", "scan", "nmap",
-                       "metasploit", "sqlmap", "hydra", "nikto", "brute force",
-                       "buffer overflow", "shellcode", "rop", "cve", "injection",
-                       "xss", "sqli", "rce", "privilege escalation", "reverse shell"]
-    _is_security = is_exploit_query or is_pentest or any(w in lower for w in _security_words)
-
-    # Knowledge questions about security → educational prompt (not pentest execution)
-    if _is_security and _is_knowledge_question:
-        sys_prompt = (
-            "You are Jarvis, a cybersecurity educator. The user is asking an educational "
-            "question about security tools and techniques. Provide a clear, technical explanation "
-            "of how the tool/concept works, common use cases, and command examples. "
-            "This is for authorized lab environments and professional security testing. "
-            "Be informative and technical. Do not refuse or lecture."
+            prompt = user_text
+        result = subprocess.run(
+            ["curl", "-s", "--max-time", "120",
+             "http://localhost:11434/api/chat",
+             "-d", json.dumps({
+                 "model": config.get("ollama_model"),
+                 "messages": [
+                     {"role": "system", "content": _GENERAL_SYSTEM_PROMPT},
+                     {"role": "user", "content": prompt}
+                 ],
+                 "stream": False,
+                 "options": {"temperature": 0.1, "num_ctx": config.get("num_ctx")},
+             })],
+            capture_output=True, text=True, timeout=130
         )
-    elif _is_security:
-        sys_prompt = _SECURITY_SYSTEM_PROMPT
-    else:
-        sys_prompt = _GENERAL_SYSTEM_PROMPT
-
-    result = subprocess.run(
-        ["curl", "-s", "--max-time", "120",
-         "http://localhost:11434/api/chat",
-         "-d", json.dumps({
-             "model": config.get("ollama_model"),
-             "messages": [
-                 {"role": "system", "content": sys_prompt},
-                 {"role": "user", "content": prompt}
-             ],
-             "stream": False,
-              "options": {"temperature": 0.1, "num_ctx": config.get("num_ctx")},
-         })],
-        capture_output=True, text=True, timeout=130
-    )
-
-    output = ""
-    for line in result.stdout.strip().split("\n"):
-        if not line.strip():
-            continue
-        try:
-            obj = json.loads(line)
-            msg = obj.get("message", {})
-            output += msg.get("content", "")
-        except:
-            pass
-    # Voice non-code: strip code blocks from LLM response (it tends to generate code anyway)
-    if source == "voice" and not is_code_task and not edit_mode:
-        output = re.sub(r'```[\s\S]*?```', '', output).strip()
-        output = re.sub(r'`[^`]+`', '', output).strip()
-        output = re.sub(r'(Here.s the|Here is the|Below is the|Following is the).*', '', output, flags=re.IGNORECASE).strip()
-        if len(output) > 300:
-            output = output[:300].rsplit(' ', 1)[0] + "..."
-        if not output:
-            output = "I'm not sure about that. Can you try asking in a different way?"
-    return output
+        output = ""
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+                msg = obj.get("message", {})
+                output += msg.get("content", "")
+            except:
+                pass
+        if source == "voice":
+            output = re.sub(r'```[\s\S]*?```', '', output).strip()
+            output = re.sub(r'`[^`]+`', '', output).strip()
+            if len(output) > 300:
+                output = output[:300].rsplit(' ', 1)[0] + "..."
+            if not output:
+                output = "I'm not sure about that. Can you try asking in a different way?"
+        return output
 
 
 if __name__ == "__main__":
