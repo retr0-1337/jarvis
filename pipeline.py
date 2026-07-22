@@ -1606,6 +1606,18 @@ def _generate_test_args(code: str, task: str) -> str:
     # Also detect C argv[N] usage
     if not argv_refs:
         argv_refs = _re.findall(r'argv\[(\d+)\]', code)
+        # For C: detect argc check to determine expected arg count
+        _argc_match = _re.search(r'argc\s*!=\s*(\d+)', code)
+        if _argc_match:
+            _expected_argc = int(_argc_match.group(1))
+            # argc includes program name, so args needed = argc - 1
+            # If max_idx < expected, use expected - 1
+            if argv_refs:
+                _current_max = max(int(x) for x in argv_refs)
+                if _current_max < _expected_argc - 1:
+                    # Add dummy refs for missing argv positions
+                    for _i in range(_current_max + 1, _expected_argc):
+                        argv_refs.append(str(_i))
     # Also detect sys.argv[N:] slices (variable number of args)
     argv_slices = _re.findall(r'sys\.argv\[(\d+):\]', code)
     if argv_refs or argv_slices:
@@ -1691,13 +1703,19 @@ def _generate_test_args(code: str, task: str) -> str:
                     if flag_matches and i == max_idx:
                         values.append(_rnd.choice(flag_matches))
                     else:
-                        task_lower = task.lower()
-                        if any(w in task_lower for w in ('float', 'decimal', 'real')):
-                            values.append(str(round(_rnd.uniform(1, 100), 2)))
-                        elif any(w in task_lower for w in ('int', 'integer', 'count')):
-                            values.append(str(_rnd.randint(1, 100)))
+                        # Check if argv is used as a string pattern (strstr, strcmp, etc.)
+                        _str_use = bool(_re.search(
+                            rf'strstr\s*\(\s*\w+\s*,\s*argv\[{i}\]', code))
+                        if _str_use:
+                            values.append(_rnd.choice(['hello', 'pattern', 'test', 'error']))
                         else:
-                            values.append(str(round(_rnd.uniform(1, 100), 2)))
+                            task_lower = task.lower()
+                            if any(w in task_lower for w in ('float', 'decimal', 'real')):
+                                values.append(str(round(_rnd.uniform(1, 100), 2)))
+                            elif any(w in task_lower for w in ('int', 'integer', 'count')):
+                                values.append(str(_rnd.randint(1, 100)))
+                            else:
+                                values.append(str(round(_rnd.uniform(1, 100), 2)))
         # Quote values that contain shell-special chars
         return ' '.join(_shlex.quote(v) for v in values)
 
@@ -1860,7 +1878,9 @@ def _exec_run(p: Pipeline, language: str, task: str,
             fix_prompt = (
                 f"Fix runtime error. Exit code: {exit_code}\n"
                 f"Error:\n{output[:2000]}\n\n"
-                "Fix the ACTUAL bug. Do not restructure — fix root cause.\n\n"
+                "Fix the ACTUAL bug. Do not restructure — fix root cause.\n"
+                "CRITICAL: Do NOT change argv indices or argc checks unless they are clearly wrong. "
+                "If the code uses argv[1] and argv[2], keep them. Do not add new argv references.\n\n"
                 f"Original task: {task}\n"
                 f"Code:\n```{language}\n{current_code[:4000]}\n```\n\n"
                 "Return COMPLETE fixed code."
@@ -1871,6 +1891,11 @@ def _exec_run(p: Pipeline, language: str, task: str,
             _, fixed = _extract_code(resp)
             if fixed and len(fixed) > 50:
                 _write_file(f"tmp/pipeline_run{_file_ext(language)}", fixed)
+                # Recompile before running fixed code
+                if language.lower() in COMPILED_LANGS:
+                    _re_compile = _compile_cmd(language, f"tmp/pipeline_run{_file_ext(language)}")
+                    if _re_compile:
+                        docker_env.exec_command(_re_compile, timeout=60)
                 re_exit, re_out = docker_env.exec_command(cmd, timeout=45)
                 if re_exit == 0:
                     p.finish_node("REPAIR_RUNTIME", True,
@@ -2988,6 +3013,9 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
         detected_lang = gen_lang or detected_lang
         code = new_code
         _write_file(filename, code)
+        # Reset arg_retried since new code may have different argv structure
+        if hasattr(p, '_arg_retried'):
+            delattr(p, '_arg_retried')
         action = "Fixed" if attempt > 0 else "Generated"
         p.finish_node("GENERATE", True,
                       f"{action} {detected_lang} code ({len(code)} chars) "
@@ -3067,6 +3095,8 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
                     _sample = '[{"name":"Alice","age":30},{"name":"Bob","age":25}]'
                 elif _fpath.endswith(('.yaml', '.yml')):
                     _sample = "name: test\nversion: 1.0\ndescription: sample"
+                elif _fpath.endswith('.toml'):
+                    _sample = "[server]\nhost = \"localhost\"\nport = 8080\n\n[database]\ndriver = \"postgres\"\nname = \"mydb\""
                 elif _fpath.endswith('.xml'):
                     _sample = '<?xml version="1.0"?><root><item>test</item></root>'
                 elif _fpath.endswith(('.bin', '.dat', '.raw', '.img')):
