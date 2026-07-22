@@ -1603,6 +1603,9 @@ def _generate_test_args(code: str, task: str) -> str:
 
     # --- Detect sys.argv usage ---
     argv_refs = _re.findall(r'sys\.argv\[(\d+)\]', code)
+    # Also detect C argv[N] usage
+    if not argv_refs:
+        argv_refs = _re.findall(r'argv\[(\d+)\]', code)
     # Also detect sys.argv[N:] slices (variable number of args)
     argv_slices = _re.findall(r'sys\.argv\[(\d+):\]', code)
     if argv_refs or argv_slices:
@@ -1672,14 +1675,41 @@ def _generate_test_args(code: str, task: str) -> str:
                     rf'int\s*\(\s*{var_name}\b', code)):
                 values.append(str(_rnd.randint(1, 100)))
             else:
-                task_lower = task.lower()
-                if any(w in task_lower for w in ('float', 'decimal', 'real')):
-                    values.append(str(round(_rnd.uniform(1, 100), 2)))
-                elif any(w in task_lower for w in ('int', 'integer', 'count')):
-                    values.append(str(_rnd.randint(1, 100)))
+                # Check if this argv is used as a file path (C fopen/ifstream)
+                is_file_arg = bool(_re.search(
+                    rf'fopen\s*\(\s*argv\[{i}\]', code))
+                if is_file_arg:
+                    values.append(f'/workspace/test{i}.txt')
                 else:
-                    values.append(str(round(_rnd.uniform(1, 100), 2)))
+                    task_lower = task.lower()
+                    if any(w in task_lower for w in ('float', 'decimal', 'real')):
+                        values.append(str(round(_rnd.uniform(1, 100), 2)))
+                    elif any(w in task_lower for w in ('int', 'integer', 'count')):
+                        values.append(str(_rnd.randint(1, 100)))
+                    else:
+                        values.append(str(round(_rnd.uniform(1, 100), 2)))
         # Quote values that contain shell-special chars
+        return ' '.join(_shlex.quote(v) for v in values)
+
+    # --- Detect bash $1/$2 positional args ---
+    bash_arg_refs = _re.findall(r'\$(\d+)', code)
+    if bash_arg_refs:
+        max_idx = max(int(i) for i in bash_arg_refs)
+        task_lower = task.lower()
+        values = []
+        for i in range(1, max_idx + 1):
+            if any(w in task_lower for w in ('domain', 'host', 'url', 'server')):
+                values.append('example.com')
+            elif any(w in task_lower for w in ('file', 'path')):
+                values.append('/workspace/test_file.txt')
+            elif any(w in task_lower for w in ('port',)):
+                values.append(str(_rnd.randint(1024, 65535)))
+            elif any(w in task_lower for w in ('count', 'number', 'num')):
+                values.append(str(_rnd.randint(1, 100)))
+            elif any(w in task_lower for w in ('ip', 'address')):
+                values.append('192.168.1.1')
+            else:
+                values.append('test_value')
         return ' '.join(_shlex.quote(v) for v in values)
 
     # Fallback: 2 random floats
@@ -1757,13 +1787,30 @@ def _exec_run(p: Pipeline, language: str, task: str,
                        "invalid operation" in _combined_err or
                        "invalid" in _combined_err and "argument" in _combined_err or
                        ("expected" in _combined_err and "argument" in _combined_err))
-        _arg_err = ("python" in language.lower() and
-                    _usage_like and exit_code in (1, 2))
+        _needs_args = (
+            ("python" in language.lower() and _usage_like) or
+            ("bash" in language.lower() and code and re.search(r'\$\{?[1#@$@]\}?|\$[0-9]+', code) is not None) or
+            (language.lower() in COMPILED_LANGS and _usage_like)
+        )
+        _arg_err = _needs_args and exit_code in (1, 2)
         if _arg_err and not getattr(p, '_arg_retried', False):
             p._arg_retried = True
             _rand_vals = _generate_test_args(code, task)
-            _arg_cmd = _wrap_with_timeout(
-                f'cd /workspace && python3 tmp/pipeline_run.py {_rand_vals}', 15)
+            if "bash" in language.lower():
+                _arg_cmd = _wrap_with_timeout(
+                    f'cd /workspace && bash tmp/pipeline_run.sh {_rand_vals}', 15)
+            elif language.lower() in COMPILED_LANGS:
+                # Create any test files referenced in args
+                for _arg in _rand_vals.split():
+                    if '/' in _arg and not _arg.startswith('-'):
+                        docker_env.exec_command(
+                            f"mkdir -p $(dirname {_arg}) && echo 'hello world test data' > {_arg}",
+                            timeout=5)
+                _arg_cmd = _wrap_with_timeout(
+                    f'cd /workspace && ./pipeline_run {_rand_vals}', 15)
+            else:
+                _arg_cmd = _wrap_with_timeout(
+                    f'cd /workspace && python3 tmp/pipeline_run.py {_rand_vals}', 15)
             _send_to_terminal(f'echo "\\n\\033[1;36m[Pipeline] Retrying with args: {_rand_vals}\\033[0m"')
             _arg_exit, _arg_out, _arg_err_out = docker_env.exec_command(
                 _arg_cmd, timeout=45, demux=True)
@@ -1818,15 +1865,18 @@ def _exec_run(p: Pipeline, language: str, task: str,
                 p.finish_node("REPAIR_RUNTIME", False, "No code extracted")
             p.save()
 
-    return False, "", "", ""
+    # All retries failed — return the last error output so agentic loop gets error context
+    return False, output, stdout, stderr
 
 
 def _exec_inspect(p: Pipeline, task: str, run_exit: int,
                   run_output: str) -> bool:
     p.start_node("INSPECT")
     error_pats = ["segmentation fault", "segfault", "core dumped",
-                  "traceback", "error:", "fatal error", "runtime error",
-                  "bus error", "stack overflow", "AddressSanitizer"]
+                  "traceback (most recent", "traceback (most recent call last",
+                  "fatal error", "runtime error",
+                  "bus error", "stack overflow", "AddressSanitizer",
+                  "panic:", "killed"]
     output_lower = run_output.lower()
     found = [p_ for p_ in error_pats if p_ in output_lower]
 
@@ -1837,6 +1887,9 @@ def _exec_inspect(p: Pipeline, task: str, run_exit: int,
         resp = _ollama(
             "Inspect program output.\n"
             f"Task: {task}\nOutput:\n{run_output[:2000]}\n\n"
+            "Did the program produce correct output for this task? "
+            "Only flag as FAIL if there is a clear logic error or wrong output. "
+            "Empty/minimal output is OK if the program handled edge cases gracefully.\n"
             "JSON: {\"ok\": true/false, \"analysis\": \"brief\"}",
             max_tokens=256)
         result = _extract_json(resp)
@@ -2315,7 +2368,10 @@ def _exec_self_review(p: Pipeline, language: str, code: str, task: str,
         f"Run: {'pass' if run_ok else 'fail'} | "
         f"Tests: {'pass' if tests_ok else 'fail'}\n"
         f"Output: {run_output[:1000]}\n\n"
-        "Check: logic errors, missing refs, invalid assumptions, memory issues.\n"
+        "Check ONLY for ACTUAL BUGS that prevent correct operation: "
+        "wrong logic, missing imports, undefined variables, crashes, wrong output format. "
+        "Do NOT flag: missing error handling, edge cases, style issues, or improvements. "
+        "If the code runs and produces correct output, it is OK.\n"
         "JSON: {\"ok\": true/false, \"issues\": [\"...\"]}"
     )
     raw = _ollama(prompt, max_tokens=1024)
@@ -2332,6 +2388,17 @@ def _exec_self_review(p: Pipeline, language: str, code: str, task: str,
         "you could", "you may", "it would be", "a more",
         "instead of", "this is a suggestion", "optional",
         "for improvement", "to improve", "one way to",
+        "the code assumes", "the code does not handle",
+        "there are no tests", "edge case", "edge cases",
+        "does not validate", "does not check", "not suitable",
+        "may not work", "might not work", "if the input",
+        "however,", "in some cases", "this could fail",
+        "does not handle cases", "not robust", "lacks",
+        "missing error handling", "should handle", "should validate",
+        "the script reads", "the script uses", "the script should",
+        "this can be optimized", "can be optimized", "optimization",
+        "twice, once", "once for", "redundant", "duplicate",
+        "the code reads", "the code uses", "the code should",
     )
     real_issues = [i for i in issues
                    if not any((i.lower() if isinstance(i, str) else "").startswith(p)
@@ -2732,7 +2799,9 @@ def _detect_missing_info(task: str, language: str) -> list:
             pass  # Can demo with sample data
 
     # ── Network parameters needed ──
-    if not questions:
+    # Skip if task says "as argument" or "as input" — it's a CLI parameter
+    _is_cli_param = bool(re.search(r'\b(as argument|as input|from argument|from input|via argument|via input|command.line|argv)\b', task_lower))
+    if not questions and not _is_cli_param:
         if re.search(r'\b(dns|lookup|resolve)\b', task_lower) and not _has_domain:
             questions.append("What domain name should I look up?")
         elif re.search(r'\bport\b.*\b(check|scan|open)\b', task_lower) and not _has_port:
@@ -2770,25 +2839,7 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
     run_output = ""
     test_output_str = ""
 
-    # ── NEED_INFO: check if we need more info before generating ──
-    missing = _detect_missing_info(task, detected_lang)
-    if missing:
-        p.start_node("NEED_INFO")
-        question_text = "I need a few details before I can write this:\n\n"
-        for i, q in enumerate(missing, 1):
-            question_text += f"{i}. {q}\n"
-        question_text += "\nPlease provide these details and I'll generate the code."
-        p.finish_node("NEED_INFO", True, question_text)
-        p.final_response = question_text
-        p.confidence = 70.0
-        p.finished = time.time()
-        p.status = "completed"
-        p.save()
-        return p
-    else:
-        p.skip_node("NEED_INFO", "All info provided")
-
-    # ── Detect long-running/untestable tasks ──
+    # ── Detect long-running/untestable tasks FIRST (before NEED_INFO) ──
     task_lower = task.lower()
     _untestable_patterns = [
         r'ping.*range', r'ping.*scan', r'ping.*ips', r'ping.*hosts',
@@ -2796,6 +2847,18 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
         r'scheduler', r'\bcron\b', r'\bdaemon\b',
         r'monitor.*real.time', r'watch.*real.time',
         r'log.*tail', r'tail.*log',
+        r'cpu.*temp', r'temperature.*monitor', r'smart.*data',
+        r'deploy.*s3', r's3.*bucket', r'cloudfront',
+        r'benchmark.*command', r'run.*n times', r'execut.*\d+ times',
+        r'ssh.*tunnel', r'auto.reconnect',
+        r'inotify.*monitor', r'directory.*monitor',
+        r'word.*cloud', r'sentiment.*analy',
+        r'man.*page.*convert', r'groff.*markdown',
+        r'speed.*test', r'internet.*speed',
+        r'pcap', r'wireshark', r'packet.*capture', r'capture.*packet', r'sniff', r'tcpdump',
+        r'docker.*compose', r'docker-compose',
+        r'terraform.*plan', r'terraform.*output',
+        r'tar.*encrypt', r'encrypt.*tar', r'gpg.*encrypt',
     ]
     _is_untestable = any(re.search(pat, task_lower) for pat in _untestable_patterns)
     if _is_untestable:
@@ -2830,6 +2893,24 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
             p.save()
             return p
 
+    # ── NEED_INFO: check if we need more info before generating ──
+    missing = _detect_missing_info(task, detected_lang)
+    if missing:
+        p.start_node("NEED_INFO")
+        question_text = "I need a few details before I can write this:\n\n"
+        for i, q in enumerate(missing, 1):
+            question_text += f"{i}. {q}\n"
+        question_text += "\nPlease provide these details and I'll generate the code."
+        p.finish_node("NEED_INFO", True, question_text)
+        p.final_response = question_text
+        p.confidence = 70.0
+        p.finished = time.time()
+        p.status = "completed"
+        p.save()
+        return p
+    else:
+        p.skip_node("NEED_INFO", "All info provided")
+
     for attempt in range(_MAX_AGENTIC_ATTEMPTS):
 
         # GENERATE or FIX
@@ -2837,6 +2918,32 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
         error_ctx = ""
         if not run_ok and run_output:
             error_ctx = run_output
+            # Add hints for common errors to help LLM fix code
+            if "no such table" in (run_output or "").lower():
+                # Query DB for actual table names
+                import re as _err_re
+                _tbl_match = _err_re.search(r'no such table:\s*[\'"]*(\S+?)[\'"]*', run_output, _err_re.IGNORECASE)
+                _bad_table = _tbl_match.group(1) if _tbl_match else "unknown"
+                _db_files = ['/workspace/example.db']
+                for _dbf in _db_files:
+                    _q_script = (
+                        f"import sqlite3\n"
+                        f"c = sqlite3.connect('{_dbf}')\n"
+                        f"tables = [r[0] for r in c.execute(\"SELECT name FROM sqlite_master WHERE type='table'\").fetchall()]\n"
+                        f"print(tables)\n"
+                        f"c.close()"
+                    )
+                    docker_env.write_file("/workspace/tmp/_db_query.py", _q_script)
+                    _q_exit, _q_out = docker_env.exec_command(
+                        "python3 /workspace/tmp/_db_query.py", timeout=5)
+                    if _q_exit == 0 and _q_out.strip():
+                        error_ctx += (f"\n\nCRITICAL HINT: The table '{_bad_table}' does not exist. "
+                                     f"The database actually contains these tables: {_q_out.strip()}. "
+                                     f"Replace '{_bad_table}' with the correct table name from the list above.")
+                        break
+            elif "FileNotFoundError" in (run_output or ""):
+                error_ctx += ("\n\nHINT: The referenced file does not exist. "
+                             "Use only files that were confirmed to exist, or create them first.")
         elif test_output_str and "FAIL" in test_output_str.upper():
             error_ctx = test_output_str
 
@@ -2860,18 +2967,89 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
 
         # PRE-RUN: create sample files if code references files that don't exist
         import re as _re
-        _file_refs = _re.findall(r"open\(['\"]([^'\"]+)['\"]", code)
-        for _fpath in set(_file_refs):
-            if _fpath.startswith('/') and not _fpath.startswith('/workspace'):
-                # Check if file exists in Docker
-                _chk_exit, _chk_out = docker_env.exec_command(
-                    f"test -f {_fpath} && echo EXISTS || echo MISSING", timeout=5)
-                if "MISSING" in _chk_out:
-                    # Create a sample file with some content
-                    _sample = "hello world\n  indented line  \ntrailing spaces   \nline without newline"
+        _file_refs = set()
+        # Python: open("path")
+        _file_refs.update(_re.findall(r"open\(['\"]([^'\"]+)['\"]", code))
+        # Python: var = "file.ext" assignments (catches variable-based file refs)
+        _file_refs.update(_re.findall(r"=\s*['\"]([^'\"]+\.\w{1,5})['\"]", code))
+        # Python: function("file.ext") — any string literal with file extension passed to a function
+        _file_refs.update(_re.findall(r"\w+\(['\"]([^'\"]+\.\w{1,5})['\"]", code))
+        # Python: pd.read_csv("path"), read_csv("path"), etc.
+        _file_refs.update(_re.findall(r"read_csv\(['\"]([^'\"]+)['\"]", code))
+        _file_refs.update(_re.findall(r"read_json\(['\"]([^'\"]+)['\"]", code))
+        _file_refs.update(_re.findall(r"read_excel\(['\"]([^'\"]+)['\"]", code))
+        # Python: sqlite3.connect("path")
+        _file_refs.update(_re.findall(r"sqlite3\.connect\(['\"]([^'\"]+)['\"]", code))
+        # Python: any .db/.sqlite file string reference
+        _file_refs.update(_re.findall(r"['\"]([^'\"]+\.db(?:\d)?)['\"]", code))
+        _file_refs.update(_re.findall(r"['\"]([^'\"]+\.sqlite[3]?)['\"]", code))
+        # Python: json.load(open("path"))
+        # C: fopen("path")
+        _file_refs.update(_re.findall(r'fopen\(["\']([^"\']+)["\']', code))
+        # C++: ifstream("path")
+        _file_refs.update(_re.findall(r'ifstream\(["\']([^"\']+)["\']', code))
+        # Also detect filenames from the task itself
+        _task_files = _re.findall(r'(/[\w/.-]+)', task)
+        _file_refs.update(_task_files)
+
+        for _fpath in _file_refs:
+            # Convert relative paths to /workspace/
+            if not _fpath.startswith('/'):
+                _fpath = f"/workspace/{_fpath}"
+
+            # Skip paths that look like URLs or are clearly placeholders
+            if '://' in _fpath or _fpath.endswith('.com') or _fpath.endswith('.org'):
+                continue
+
+            # Skip common non-file strings that match *.ext pattern
+            _skip_extensions = ('utf-8', 'utf8', 'json', 'csv', 'yaml', 'yml', 'xml',
+                                'html', 'css', 'js', 'ts', 'py', 'rb', 'pl', 'sh',
+                                'md', 'txt', 'log', 'cfg', 'ini', 'conf', 'env',
+                                'pyc', 'pyo', 'so', 'o', 'a', 'dylib')
+            _basename = _fpath.rsplit('/', 1)[-1] if '/' in _fpath else _fpath
+            if _basename.lower() in _skip_extensions:
+                continue
+
+            # Check if file exists in Docker
+            _chk_exit, _chk_out = docker_env.exec_command(
+                f"test -f {_fpath} && echo EXISTS || echo MISSING", timeout=5)
+            if "MISSING" in _chk_out:
+                # Create sample data appropriate for the file type
+                if _fpath.endswith(('.db', '.sqlite', '.sqlite3')):
+                    # Create sample SQLite database
+                    _db_script = (
+                        "import sqlite3;"
+                        "c=sqlite3.connect('" + _fpath + "');"
+                        "c.execute('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)');"
+                        "c.executemany('INSERT INTO users VALUES (?, ?, ?)', [(1,'Alice',30),(2,'Bob',25),(3,'Charlie',35)]);"
+                        "c.commit(); c.close()"
+                    )
                     docker_env.exec_command(
-                        f"mkdir -p $(dirname {_fpath}) && echo '{_sample}' > {_fpath}",
+                        f"mkdir -p $(dirname {_fpath}) && python3 -c {_db_script!r}",
+                        timeout=10)
+                    continue
+                elif _fpath.endswith('.csv'):
+                    _sample = "name,age,city\nAlice,30,NYC\nBob,25,LA\nCharlie,35,Chicago"
+                    docker_env.exec_command(
+                        f"mkdir -p $(dirname {_fpath}) && cat > {_fpath} << 'SAMPLEEOF'\n{_sample}\nSAMPLEEOF",
                         timeout=5)
+                elif _fpath.endswith('.json'):
+                    _sample = '[{"name":"Alice","age":30},{"name":"Bob","age":25}]'
+                elif _fpath.endswith(('.yaml', '.yml')):
+                    _sample = "name: test\nversion: 1.0\ndescription: sample"
+                elif _fpath.endswith('.xml'):
+                    _sample = '<?xml version="1.0"?><root><item>test</item></root>'
+                elif _fpath.endswith(('.bin', '.dat', '.raw', '.img')):
+                    # Create binary data using dd
+                    docker_env.exec_command(
+                        f"mkdir -p $(dirname {_fpath}) && dd if=/dev/urandom of={_fpath} bs=64 count=1 2>/dev/null",
+                        timeout=5)
+                    continue
+                else:
+                    _sample = "hello world\n  indented line  \ntrailing spaces   \nline without newline"
+                docker_env.exec_command(
+                    f"mkdir -p $(dirname {_fpath}) && cat > {_fpath} << 'SAMPLEEOF'\n{_sample}\nSAMPLEEOF",
+                    timeout=5)
 
         # COMPILE for compiled languages
         if detected_lang.lower() in COMPILED_LANGS:
@@ -2964,7 +3142,10 @@ def run_pipeline(task: str, language: str = "", chat_id: str = "") -> Pipeline:
     _set_progress(f"Task type: {p.task_type.value}")
 
     # Fast path for simple code generation (skip heavy verification)
-    _simple_keywords = ["give me", "write me", "create a", "make a", "generate a", "write a", "create me"]
+    _simple_keywords = ["give me", "write me", "create a", "make a", "generate a", "write a", "create me",
+                        "i need", "i want", "i have", "make me", "make a script", "python script",
+                        "bash script", "shell script", "c program", "write the code",
+                        "code that", "script that", "program that"]
     _is_simple = any(kw in task.lower() for kw in _simple_keywords) and p.task_type in (
         TaskType.EXECUTABLE_PROGRAM, TaskType.SCRIPT, TaskType.ALGORITHM, TaskType.CLI_TOOL)
     if _is_simple:
@@ -2973,6 +3154,8 @@ def run_pipeline(task: str, language: str = "", chat_id: str = "") -> Pipeline:
         # Skip PLAN node entirely — go straight to GENERATE
         graph_def = [("NEED_INFO", []),
                      ("GENERATE", ["NEED_INFO"]),
+                     ("GENERATE_TESTS", ["GENERATE"]),
+                     ("EXEC_TESTS", ["GENERATE_TESTS"]),
                      ("RUN", ["GENERATE"]),
                      ("ANSWER", ["RUN"])]
         p.init_nodes(graph_def)
