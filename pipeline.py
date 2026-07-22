@@ -35,7 +35,7 @@ import docker_env
 STATUS_FILE = "/tmp/jarvis_pipeline.json"
 FAILURES_DIR = os.path.expanduser("~/.local/share/jarvis/failures")
 MAX_COMPILE_RETRIES = 5
-MAX_RUNTIME_RETRIES = 5
+MAX_RUNTIME_RETRIES = 3
 MAX_TEST_RETRIES = 3
 MAX_DEP_CHECK_RETRIES = 3
 MAX_NO_PROGRESS = 3
@@ -522,7 +522,7 @@ SKIP_OK = {"PLAN", "WORKSPACE_INVENTORY", "COMPILE", "REPAIR_COMPILE",
            "STATIC_ANALYSIS", "REPAIR_TESTS", "REPAIR_RUNTIME",
            "DEPENDENCY_CHECK", "REALITY_CHECK", "REPAIR_DEPS",
            "REPAIR_LOGIC", "REPAIR_SECURITY", "UNDERSTAND", "REGRESSION",
-           "GENERATE_TESTS", "EXEC_TESTS"}
+           "GENERATE_TESTS", "EXEC_TESTS", "NEED_INFO"}
 
 
 def build_verification_graph(task_type: TaskType, language: str,
@@ -952,6 +952,9 @@ def _generate_test_input(code: str) -> list:
             values.append(random.choice(["yes", "y", "1"]))
         elif any(w in prompt for w in ["menu", "choice", "option", "select"]):
             values.append(str(random.randint(1, 3)))
+        elif any(w in prompt for w in ["path", "directory", "folder", "dir", "file",
+                                        "location", "source", "destination", "dest"]):
+            values.append(random.choice([".", "/tmp", "/tmp/test_dir", "/workspace"]))
         else:
             if is_float:
                 values.append(str(round(random.uniform(1.0, 50.0), 2)))
@@ -1284,6 +1287,9 @@ def _exec_generate(p: Pipeline, task: str, language: str, plan: dict,
         "    b) NEVER call a function not in workspace inventory.\n"
         "    c) If you need new types, DEFINE THEM in the same file.\n"
         "    d) Only use #include <standard_library_headers>.\n"
+        "13. FUNCTION NAMES: If the task references existing files with specific function names, "
+        "KEEP those exact function names. Do NOT rename or reformat them.\n"
+        "14. IMPORTS: Always import all modules you use at the top of the file.\n"
         + inv_context
         + f"\n\nPlan: {json.dumps(plan, indent=2)}\n\n"
         f"Task: {task}"
@@ -1340,7 +1346,7 @@ def _exec_generate(p: Pipeline, task: str, language: str, plan: dict,
         p.save()
         return "", ""
 
-    detected = language or lang or "python"
+    detected = language or lang or _detect_language_from_task(task, "")
     p.language = detected
     ext = _file_ext(detected)
     filename = f"tmp/pipeline_run{ext}"
@@ -1358,6 +1364,96 @@ def _exec_generate(p: Pipeline, task: str, language: str, plan: dict,
                 p.finish_node("GENERATE", False, f"Anti-pattern: {reason}")
                 p.save()
                 return detected, ""
+
+        # POST-GENERATE: Check for missing imports and fix them
+        _missing_imports = []
+        _common_modules = {
+            'threading': r'\bthreading\.\w+',
+            'asyncio': r'\basyncio\.\w+',
+            'subprocess': r'\bsubprocess\.\w+',
+            'os': r'\bos\.\w+',
+            'sys': r'\bsys\.\w+',
+            're': r'\bre\.\w+',
+            'json': r'\bjson\.\w+',
+            'time': r'\btime\.\w+',
+            'datetime': r'\bdatetime\.\w+',
+            'collections': r'\bcollections\.\w+',
+            'functools': r'\bfunctools\.\w+',
+            'itertools': r'\bitertools\.\w+',
+            'math': r'\bmath\.\w+',
+            'random': r'\brandom\.\w+',
+            'socket': r'\bsocket\.\w+',
+            'http': r'\bhttp\.\w+',
+            'urllib': r'\burllib\.\w+',
+            'csv': r'\bcsv\.\w+',
+            'sqlite3': r'\bsqlite3\.\w+',
+            'pathlib': r'\bpathlib\.\w+',
+            'shutil': r'\bshutil\.\w+',
+            'glob': r'\bglob\.\w+',
+            'argparse': r'\bargparse\.\w+',
+            'logging': r'\blogging\.\w+',
+            'hashlib': r'\bhashlib\.\w+',
+            'base64': r'\bbase64\.\w+',
+            'struct': r'\bstruct\.\w+',
+            'queue': r'\bqueue\.\w+',
+            'signal': r'\bsignal\.\w+',
+            'fcntl': r'\bfcntl\.\w+',
+            'pickle': r'\bpickle\.\w+',
+            'copy': r'\bcopy\.\w+',
+            'heapq': r'\bheapq\.\w+',
+            'bisect': r'\bbisect\.\w+',
+            'array': r'\barray\.\w+',
+            'io': r'\bio\.\w+',
+            'select': r'\bselect\.\w+',
+        }
+        _imported = set(re.findall(r'^(?:import|from)\s+(\w+)', code, re.MULTILINE))
+        for _mod, _pat in _common_modules.items():
+            if _mod not in _imported and re.search(_pat, code):
+                _missing_imports.append(_mod)
+        # Also detect bare usage of common names that need `from X import Y`
+        _from_imports_needed = {
+            'lru_cache': ('functools', 'lru_cache'),
+            'dataclass': ('dataclasses', 'dataclass'),
+            'field': ('dataclasses', 'field'),
+            'abstractmethod': ('abc', 'abstractmethod'),
+            'ABC': ('abc', 'ABC'),
+            'Enum': ('enum', 'Enum'),
+            'namedtuple': ('collections', 'namedtuple'),
+            'defaultdict': ('collections', 'defaultdict'),
+            'deque': ('collections', 'deque'),
+            'Counter': ('collections', 'Counter'),
+            'ChainMap': ('collections', 'ChainMap'),
+            'OrderedDict': ('collections', 'OrderedDict'),
+            'contextmanager': ('contextlib', 'contextmanager'),
+            'suppress': ('contextlib', 'suppress'),
+            'redirect_stdout': ('contextlib', 'redirect_stdout'),
+            'sleep': ('time', 'sleep'),
+            'perf_counter': ('time', 'perf_counter'),
+            'Path': ('pathlib', 'Path'),
+            'BytesIO': ('io', 'BytesIO'),
+            'StringIO': ('io', 'StringIO'),
+        }
+        _from_import_map = {}
+        for _name, (_from_mod, _from_name) in _from_imports_needed.items():
+            if _from_mod in _imported:
+                continue
+            if re.search(rf'(?<!\w){_name}(?!\w)', code):
+                if re.search(rf'from\s+{_from_mod}\s+import\s+.*{_name}', code):
+                    continue
+                if _from_mod not in _from_import_map:
+                    _from_import_map[_from_mod] = []
+                if _from_name not in _from_import_map[_from_mod]:
+                    _from_import_map[_from_mod].append(_from_name)
+        _simple_imports = [m for m in _missing_imports if isinstance(m, str)]
+        if _simple_imports or _from_import_map:
+            _import_lines = []
+            for m in _simple_imports:
+                _import_lines.append(f"import {m}")
+            for mod, names in _from_import_map.items():
+                _import_lines.append(f"from {mod} import {', '.join(names)}")
+            _import_block = "\n".join(_import_lines)
+            code = _import_block + "\n\n" + code
+            _write_file(filename, code)
 
     p.finish_node("GENERATE", True,
                   f"Generated {len(code)} chars of {detected}",
@@ -1778,6 +1874,7 @@ def _exec_run(p: Pipeline, language: str, task: str,
 
     run_ok = False
     run_output = run_stdout = run_stderr = ""
+    _run_start = time.time()  # Track total time for REPAIR_RUNTIME budget
 
     # Check for abbreviated code before running
     if code and _is_code_abbreviated(code):
@@ -1869,6 +1966,13 @@ def _exec_run(p: Pipeline, language: str, task: str,
         _record_failure(p, "RUN", f"exit={exit_code}", output[:500])
 
         if attempt < MAX_RUNTIME_RETRIES - 1:
+            # Total time budget: bail out of REPAIR_RUNTIME if we've spent too long
+            _total_elapsed = time.time() - _run_start if '_run_start' in dir() else 0
+            if _total_elapsed > 120:
+                p.finish_node("REPAIR_RUNTIME", False,
+                              f"Total time budget exceeded ({_total_elapsed:.0f}s > 120s)")
+                p.save()
+                break
             p.start_node("REPAIR_RUNTIME")
             past = _search_failures(language, task)
             # Read current code from workspace (code variable not in scope here)
@@ -1880,7 +1984,9 @@ def _exec_run(p: Pipeline, language: str, task: str,
                 f"Error:\n{output[:2000]}\n\n"
                 "Fix the ACTUAL bug. Do not restructure — fix root cause.\n"
                 "CRITICAL: Do NOT change argv indices or argc checks unless they are clearly wrong. "
-                "If the code uses argv[1] and argv[2], keep them. Do not add new argv references.\n\n"
+                "If the code uses argv[1] and argv[2], keep them. Do not add new argv references.\n"
+                "CRITICAL: Do NOT rename functions or classes. Keep all existing names exactly as-is.\n"
+                "CRITICAL: Always import all modules you use at the top of the file.\n\n"
                 f"Original task: {task}\n"
                 f"Code:\n```{language}\n{current_code[:4000]}\n```\n\n"
                 "Return COMPLETE fixed code."
@@ -2752,6 +2858,9 @@ def _agentic_generate(task: str, language: str, previous_code: str = "",
             f"1. Output a single ```{language} code block.\n"
             f"2. Write the ENTIRE program, no placeholders.\n"
             f"3. Brief explanation after the code.\n"
+            f"4. CRITICAL: If the task references existing files with specific function names, "
+            f"KEEP those exact function names. Do NOT rename or reformat them.\n"
+            f"5. CRITICAL: Always import all modules you use at the top of the file.\n"
             f"Task: {task}"
         )
     else:
@@ -2765,6 +2874,8 @@ def _agentic_generate(task: str, language: str, previous_code: str = "",
             "2. Fix ONLY the broken part — do not rewrite working code\n"
             "3. Return the COMPLETE fixed code in a ```language block\n"
             "4. Explain what you fixed in 1-2 sentences\n"
+            "5. Do NOT rename functions or classes — keep all existing names\n"
+            "6. Always import all modules you use at the top of the file\n"
         )
     raw = _ollama(prompt, max_tokens=4096)
     lang, code = _extract_code(raw)
@@ -2822,7 +2933,7 @@ def _detect_missing_info(task: str, language: str) -> list:
         elif re.search(r'\bhash\b.*\b(file|sha|md5)\b', task_lower):
             questions.append("Which file should I compute the hash of?")
         elif re.search(r'\bduplicate files?\b', task_lower) and not _has_path:
-            questions.append("Which directory should I scan for duplicate files?")
+            pass  # Use current directory as default
         elif re.search(r'\bparse\b.*\bgit log\b', task_lower):
             pass  # git log can be parsed from stdin, no path needed
         elif re.search(r'\bfind\b.*\blargest files?\b', task_lower) and not _has_path:
@@ -2832,13 +2943,13 @@ def _detect_missing_info(task: str, language: str) -> list:
         elif re.search(r'\b(delete|remove|clean)\b.*\b(old|older)\b', task_lower) and not _has_path:
             questions.append("What directory should I clean? (e.g., /tmp)")
         elif re.search(r'\bbackup\b.*\b(directory|tar|archive)\b', task_lower) and not _has_path:
-            questions.append("What directory should I back up?")
+            pass  # Use /tmp as default
         elif re.search(r'\bsort\b.*\b(by length)\b', task_lower) and not _has_path:
-            questions.append("What file should I sort?")
+            pass  # Use stdin or sample data
         elif re.search(r'\bwatch\b.*\b(directory|folder|new files)\b', task_lower) and not _has_path:
-            questions.append("Which directory should I watch for new files?")
+            pass  # Use /tmp as default
         elif re.search(r'\bmonitor\b.*\blog\b', task_lower) and not _has_path:
-            questions.append("Which log file should I monitor?")
+            pass  # Use /tmp as default
         elif re.search(r'\bconvert\b.*\b(json|csv)\b', task_lower) and not _has_path:
             pass  # Can demo with sample data
 
@@ -2873,8 +2984,34 @@ def _detect_missing_info(task: str, language: str) -> list:
     return questions[:2]  # Max 2 questions at a time
 
 
+def _detect_language_from_task(task: str, provided_lang: str) -> str:
+    """Detect programming language from task description if not explicitly provided."""
+    if provided_lang:
+        return provided_lang
+    task_lower = task.lower()
+    # Explicit language mentions
+    lang_patterns = {
+        'c': [r'\b(?:write|create|implement|fix)\s+(?:a\s+)?c\s+(?:program|project|file|code)',
+              r'\bwith\s+main\.c\b', r'\bmain\.c\b', r'\bgcc\b', r'\b#include\s*[<"]'],
+        'c++': [r'\b(?:write|create|implement|fix)\+(?:a\s+)?c\+\+\s+(?:program|project|file|code)',
+                r'\bwith\s+main\.cpp\b', r'\bmain\.cpp\b', r'\bg\+\+\b', r'\bstd::'],
+        'rust': [r'\b(?:write|create|implement|fix)\+(?:a\s+)?rust\s+(?:program|project|file|code)',
+                 r'\bfn\s+main\b.*\{', r'\buse\s+std::', r'\bprintln!\b', r'\bCargo\.toml\b'],
+        'go': [r'\b(?:write|create|implement|fix)\+(?:a\s+)?go\s+(?:program|project|file|code)',
+               r'\bpackage\s+main\b', r'\bfunc\s+main\(\)', r'\bfmt\.\b'],
+        'java': [r'\b(?:write|create|implement|fix)\+(?:a\s+)?java\s+(?:program|project|file|code)',
+                 r'\bpublic\s+static\s+void\s+main\b', r'\bclass\s+\w+\s*\{'],
+        'bash': [r'\b(?:write|create|implement|fix)\+(?:a\s+)?bash\s+(?:script|file|code)',
+                 r'\b#!/bin/bash\b', r'\bshell\s+script\b'],
+    }
+    for lang, patterns in lang_patterns.items():
+        if any(re.search(p, task_lower) for p in patterns):
+            return lang
+    return "python"  # Default fallback
+
+
 def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipeline:
-    detected_lang = language or "python"
+    detected_lang = _detect_language_from_task(task, language)
     ext = _file_ext(detected_lang)
     filename = f"tmp/pipeline_run{ext}"
 
@@ -2930,10 +3067,21 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
             p.language = detected_lang
             # Skip RUN and TEST — mark as code-only
             p.skip_node("RUN", "Long-running task — code generated but not executed")
+            # Complete all remaining nodes so all_required_passed() works
+            for n in p.nodes:
+                if n.status == NodeStatus.PENDING:
+                    if n.id == "NEED_INFO":
+                        p.skip_node("NEED_INFO", "Not needed for untestable task")
+                    elif n.id in ("GENERATE_TESTS", "EXEC_TESTS"):
+                        p.skip_node(n.id, "Skipped — long-running task")
+                    elif n.id == "ANSWER":
+                        pass  # Will be set below
             p.final_response = (f"Here's your {detected_lang} code:\n\n"
                                f"```{detected_lang}\n{code}\n```\n\n"
                                f"**Note:** This is a long-running/network task — "
                                f"code generated but not executed automatically.")
+            p.start_node("ANSWER")
+            p.finish_node("ANSWER", True, p.final_response[:2000])
             p.confidence = 85.0
             p.finished = time.time()
             p.status = "completed"
@@ -3022,6 +3170,117 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
                       f"[attempt {attempt + 1}]")
         p.language = detected_lang
         p.save()
+
+        # POST-GENERATE: Check for missing imports and fix them
+        if detected_lang.lower() == "python" and code:
+            import re as _re_import
+            _missing_imports = []
+            _common_modules = {
+                'threading': r'\bthreading\.\w+',
+                'asyncio': r'\basyncio\.\w+',
+                'subprocess': r'\bsubprocess\.\w+',
+                'os': r'\bos\.\w+',
+                'sys': r'\bsys\.\w+',
+                're': r'\bre\.\w+',
+                'json': r'\bjson\.\w+',
+                'time': r'\btime\.\w+',
+                'datetime': r'\bdatetime\.\w+',
+                'collections': r'\bcollections\.\w+',
+                'functools': r'\bfunctools\.\w+',
+                'itertools': r'\bitertools\.\w+',
+                'math': r'\bmath\.\w+',
+                'random': r'\brandom\.\w+',
+                'socket': r'\bsocket\.\w+',
+                'http': r'\bhttp\.\w+',
+                'urllib': r'\burllib\.\w+',
+                'csv': r'\bcsv\.\w+',
+                'sqlite3': r'\bsqlite3\.\w+',
+                'pathlib': r'\bpathlib\.\w+',
+                'shutil': r'\bshutil\.\w+',
+                'glob': r'\bglob\.\w+',
+                'argparse': r'\bargparse\.\w+',
+                'logging': r'\blogging\.\w+',
+                'hashlib': r'\bhashlib\.\w+',
+                'base64': r'\bbase64\.\w+',
+                'struct': r'\bstruct\.\w+',
+                'queue': r'\bqueue\.\w+',
+                'signal': r'\bsignal\.\w+',
+                'fcntl': r'\bfcntl\.\w+',
+                'pickle': r'\bpickle\.\w+',
+                'copy': r'\bcopy\.\w+',
+                'heapq': r'\bheapq\.\w+',
+                'bisect': r'\bbisect\.\w+',
+                'array': r'\barray\.\w+',
+                'io': r'\bio\.\w+',
+                'select': r'\bselect\.\w+',
+                'email': r'\bemail\.\w+',
+                'xml': r'\bxml\.\w+',
+                'html': r'\bhtml\.\w+',
+                'http.server': r'\bhttp\.server\.\w+',
+                'http.client': r'\bhttp\.client\.\w+',
+            }
+            # Check which modules are used but not imported
+            _imported = set(_re_import.findall(r'^(?:import|from)\s+(\w+)', code, _re_import.MULTILINE))
+            for _mod, _pat in _common_modules.items():
+                if _mod not in _imported and _re_import.search(_pat, code):
+                    _missing_imports.append(_mod)
+            # Also detect bare usage of common names that need `from X import Y`
+            _from_imports_needed = {
+                'lru_cache': ('functools', 'lru_cache'),
+                'dataclass': ('dataclasses', 'dataclass'),
+                'field': ('dataclasses', 'field'),
+                'abstractmethod': ('abc', 'abstractmethod'),
+                'ABC': ('abc', 'ABC'),
+                'Enum': ('enum', 'Enum'),
+                'namedtuple': ('collections', 'namedtuple'),
+                'defaultdict': ('collections', 'defaultdict'),
+                'deque': ('collections', 'deque'),
+                'Counter': ('collections', 'Counter'),
+                'ChainMap': ('collections', 'ChainMap'),
+                'OrderedDict': ('collections', 'OrderedDict'),
+                'contextmanager': ('contextlib', 'contextmanager'),
+                'suppress': ('contextlib', 'suppress'),
+                'redirect_stdout': ('contextlib', 'redirect_stdout'),
+                'sleep': ('time', 'sleep'),
+                'perf_counter': ('time', 'perf_counter'),
+                'strftime': ('time', 'strftime'),
+                'Path': ('pathlib', 'Path'),
+                'BytesIO': ('io', 'BytesIO'),
+                'StringIO': ('io', 'StringIO'),
+                'logging': ('logging', None),
+            }
+            # Find bare names used in code (not prefixed by module)
+            for _name, (_from_mod, _from_name) in _from_imports_needed.items():
+                if _from_mod in _imported:
+                    continue
+                # Check if name is used bare (not as module.name)
+                if _re_import.search(rf'(?<!\w){_name}(?!\w)', code):
+                    # Check it's not already imported
+                    if _re_import.search(rf'from\s+{_from_mod}\s+import\s+.*{_name}', code):
+                        continue
+                    if _name in _from_mod:  # e.g. 'logging' used as bare name
+                        continue
+                    _missing_imports.append((_from_mod, _from_name))
+            # Deduplicate: collapse (mod, name) tuples into from-imports, keep simple module names
+            _simple_imports = [m for m in _missing_imports if isinstance(m, str)]
+            _from_import_map = {}
+            for item in _missing_imports:
+                if isinstance(item, tuple):
+                    mod, name = item
+                    if mod not in _from_import_map:
+                        _from_import_map[mod] = []
+                    if name and name not in _from_import_map[mod]:
+                        _from_import_map[mod].append(name)
+            # Add missing imports at the top of the code
+            if _simple_imports or _from_import_map:
+                _import_lines = []
+                for m in _simple_imports:
+                    _import_lines.append(f"import {m}")
+                for mod, names in _from_import_map.items():
+                    _import_lines.append(f"from {mod} import {', '.join(names)}")
+                _import_block = "\n".join(_import_lines)
+                code = _import_block + "\n\n" + code
+                _write_file(filename, code)
 
         # PRE-RUN: create sample files if code references files that don't exist
         import re as _re
@@ -3339,10 +3598,11 @@ def run_pipeline(task: str, language: str = "", chat_id: str = "") -> Pipeline:
 
         # ── REPAIR COMPILE ────────────────────────────────────────────
         elif node_id == "REPAIR_COMPILE":
-            # Handled inside _exec_compile loop; skip if compile already passed
+            # Handled inside _exec_compile loop; skip if compile already passed/skipped,
+            # or if compile node was removed from graph (interpreted languages)
             cn = p.get_node("COMPILE")
-            if cn and cn.status == NodeStatus.SUCCESS:
-                p.skip_node("REPAIR_COMPILE", "Compile passed — no repair needed")
+            if cn is None or cn.status in (NodeStatus.SUCCESS, NodeStatus.SKIPPED):
+                p.skip_node("REPAIR_COMPILE", "No compile needed — skipping repair")
 
         # ── RUN ───────────────────────────────────────────────────────
         elif node_id == "RUN":
@@ -3352,10 +3612,10 @@ def run_pipeline(task: str, language: str = "", chat_id: str = "") -> Pipeline:
 
         # ── REPAIR RUNTIME ────────────────────────────────────────────
         elif node_id == "REPAIR_RUNTIME":
-            # Handled inside _exec_run loop; skip if run already passed
+            # Handled inside _exec_run loop; skip if run already passed or skipped
             rn = p.get_node("RUN")
-            if rn and rn.status == NodeStatus.SUCCESS:
-                p.skip_node("REPAIR_RUNTIME", "Run passed — no repair needed")
+            if rn and rn.status in (NodeStatus.SUCCESS, NodeStatus.SKIPPED):
+                p.skip_node("REPAIR_RUNTIME", "Run passed/skipped — no repair needed")
 
         # ── INSPECT ───────────────────────────────────────────────────
         elif node_id == "INSPECT":
