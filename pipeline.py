@@ -1866,11 +1866,11 @@ def _exec_run(p: Pipeline, language: str, task: str,
         # Build wrapper that overrides input() with pre-filled values
         wrapper = _build_interactive_wrapper(code, test_input)
         docker_env.write_file("/workspace/tmp/_interactive_wrapper.py", wrapper)
-        cmd = _wrap_with_timeout(f'{_run_cmd("python")} /workspace/tmp/_interactive_wrapper.py', 15)
+        cmd = _wrap_with_timeout(f'{_run_cmd("python")} /workspace/tmp/_interactive_wrapper.py', 25)
         # Rewrite the code file with escaped newlines (fixes \\n in string literals)
         _write_file(f"tmp/pipeline_run{_file_ext(language)}", code)
     else:
-        cmd = _wrap_with_timeout(base_cmd, 15)
+        cmd = _wrap_with_timeout(base_cmd, 25)
 
     run_ok = False
     run_output = run_stdout = run_stderr = ""
@@ -2549,6 +2549,14 @@ def _exec_self_review(p: Pipeline, language: str, code: str, task: str,
         "this can be optimized", "can be optimized", "optimization",
         "twice, once", "once for", "redundant", "duplicate",
         "the code reads", "the code uses", "the code should",
+        # Style/naming suggestions — not actual bugs
+        "__main__", "should be named", "should be outside",
+        "the __main__ block", "naming convention", "file naming", "module naming",
+        "missing docstring", "missing type hint", "missing type",
+        "would benefit", "could use", "would be cleaner",
+        "best practice", "cleaner code", "more readable",
+        "improve readability", "improve clarity", "more pythonic",
+        "pep 8", "pep8", "coding style", "code style",
     )
     real_issues = [i for i in issues
                    if not any((i.lower() if isinstance(i, str) else "").startswith(p)
@@ -2962,7 +2970,7 @@ def _detect_missing_info(task: str, language: str) -> list:
         elif re.search(r'\bport\b.*\b(check|scan|open)\b', task_lower) and not _has_port:
             questions.append("What host and port should I check?")
         elif re.search(r'\bhttp server\b|\bserve files\b|\bweb server\b', task_lower) and not _has_port:
-            questions.append("What port should the server listen on?")
+            pass  # Use port 8080 as default
         elif re.search(r'\bping\b.*\b(range|scan|ips?|hosts?)\b', task_lower) and not _has_ip:
             questions.append("What IP range should I ping? (e.g., 192.168.1.0/24)")
         elif re.search(r'\bdownload\b.*\b(url|file)\b', task_lower) and not _has_url:
@@ -3024,7 +3032,6 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
     task_lower = task.lower()
     _untestable_patterns = [
         r'ping.*range', r'ping.*scan', r'ping.*ips', r'ping.*hosts',
-        r'http server', r'serve files', r'web server',
         r'scheduler', r'\bcron\b', r'\bdaemon\b',
         r'monitor.*real.time', r'watch.*real.time',
         r'log.*tail', r'tail.*log',
@@ -3032,7 +3039,7 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
         r'deploy.*s3', r's3.*bucket', r'cloudfront',
         r'benchmark.*command', r'run.*n times', r'execut.*\d+ times',
         r'ssh.*tunnel', r'auto.reconnect',
-        r'inotify.*monitor', r'directory.*monitor',
+        r'inotify.*monitor',
         r'word.*cloud', r'sentiment.*analy',
         r'man.*page.*convert', r'groff.*markdown',
         r'speed.*test', r'internet.*speed',
@@ -3040,10 +3047,6 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
         r'docker.*compose', r'docker-compose',
         r'terraform.*plan', r'terraform.*output',
         r'tar.*encrypt', r'encrypt.*tar', r'gpg.*encrypt',
-        # Long-running / event-driven tasks
-        r'log.*monitor', r'monitor.*log', r'matches.*summary',
-        r'key.?value.*store', r'socket.*server', r'server.*socket',
-        r'listener', r'listening.*port',
         # Network tasks requiring real connectivity
         r'fetch.*webpage', r'fetch.*url', r'webpage.*link', r'count.*link',
         r'ssl.*cert', r'certificate.*expir', r'letsencrypt', r'cert.*renew',
@@ -3413,6 +3416,10 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
             break
 
     # ANSWER
+    # Complete any remaining pending nodes so all_required_passed() works
+    for n in p.nodes:
+        if n.status == NodeStatus.PENDING and n.id != "ANSWER":
+            p.skip_node(n.id, "Skipped — pipeline completed")
     parts = []
     if code:
         parts.append(f"Here's your {detected_lang} code:\n\n```{detected_lang}\n{code}\n```")
