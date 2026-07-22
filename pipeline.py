@@ -1681,13 +1681,23 @@ def _generate_test_args(code: str, task: str) -> str:
                 if is_file_arg:
                     values.append(f'/workspace/test{i}.txt')
                 else:
-                    task_lower = task.lower()
-                    if any(w in task_lower for w in ('float', 'decimal', 'real')):
-                        values.append(str(round(_rnd.uniform(1, 100), 2)))
-                    elif any(w in task_lower for w in ('int', 'integer', 'count')):
-                        values.append(str(_rnd.randint(1, 100)))
+                    # Check if this argv is compared to flag strings (C strcmp)
+                    flag_matches = _re.findall(
+                        rf'strcmp\s*\(\s*\w*\s*,\s*["\']([^"\']+)["\']\s*\)', code)
+                    # Also check direct comparison: argv[N] == "flag"
+                    flag_matches += _re.findall(
+                        rf'argv\[{i}\]\s*==\s*["\']([^"\']+)["\']', code)
+                    # Only use flags for the LAST argv position (flags typically come last)
+                    if flag_matches and i == max_idx:
+                        values.append(_rnd.choice(flag_matches))
                     else:
-                        values.append(str(round(_rnd.uniform(1, 100), 2)))
+                        task_lower = task.lower()
+                        if any(w in task_lower for w in ('float', 'decimal', 'real')):
+                            values.append(str(round(_rnd.uniform(1, 100), 2)))
+                        elif any(w in task_lower for w in ('int', 'integer', 'count')):
+                            values.append(str(_rnd.randint(1, 100)))
+                        else:
+                            values.append(str(round(_rnd.uniform(1, 100), 2)))
         # Quote values that contain shell-special chars
         return ' '.join(_shlex.quote(v) for v in values)
 
@@ -1700,6 +1710,8 @@ def _generate_test_args(code: str, task: str) -> str:
         for i in range(1, max_idx + 1):
             if any(w in task_lower for w in ('domain', 'host', 'url', 'server')):
                 values.append('example.com')
+            elif any(w in task_lower for w in ('directory', 'directories', 'dir', 'dirs', 'folder', 'folders')):
+                values.append(f'/workspace/test_dir{i}')
             elif any(w in task_lower for w in ('file', 'path')):
                 values.append('/workspace/test_file.txt')
             elif any(w in task_lower for w in ('port',)):
@@ -1797,6 +1809,13 @@ def _exec_run(p: Pipeline, language: str, task: str,
             p._arg_retried = True
             _rand_vals = _generate_test_args(code, task)
             if "bash" in language.lower():
+                # Create test files/dirs for bash args
+                for _arg in _rand_vals.split():
+                    _arg_clean = _arg.strip("'\"")
+                    if '/' in _arg_clean:
+                        docker_env.exec_command(
+                            f"mkdir -p {_arg_clean} && [ -f {_arg_clean} ] || echo 'test data' > {_arg_clean}",
+                            timeout=5)
                 _arg_cmd = _wrap_with_timeout(
                     f'cd /workspace && bash tmp/pipeline_run.sh {_rand_vals}', 15)
             elif language.lower() in COMPILED_LANGS:
@@ -2751,7 +2770,7 @@ def _detect_missing_info(task: str, language: str) -> list:
     # ── File path needed ──
     if not _has_path:
         # grep/search in files
-        if re.search(r'\bgrep\b.*\b(in|from|files?)\b', task_lower):
+        if re.search(r'\bgrep\b.*\b(in|from|files?)\b', task_lower) and not re.search(r'\ba pattern\b|\bsome pattern\b|\bthe pattern\b', task_lower):
             questions.append("What pattern should I search for, and in which directory?")
         elif re.search(r'\bsearch\b.*\b(pattern|regex)\b', task_lower):
             questions.append("What pattern should I search for, and in which file/directory?")
@@ -2761,7 +2780,7 @@ def _detect_missing_info(task: str, language: str) -> list:
             questions.append("What input file should I process?")
         elif re.search(r'\bcount\b.*\b(lines?|words?)\b.*\b(in|of)\b', task_lower) and not _has_path:
             questions.append("What file or directory should I count in?")
-        elif re.search(r'\bword frequency\b', task_lower) and not _has_path:
+        elif re.search(r'\bword frequency\b', task_lower) and not _has_path and not re.search(r'\btext file\b', task_lower):
             questions.append("What text file should I analyze?")
         elif re.search(r'\b(find|extract)\b.*\b(email|emails?)\b', task_lower) and not _has_path:
             questions.append("What file or text should I search for emails in?")
@@ -2859,6 +2878,17 @@ def _run_fast_path(p: Pipeline, task: str, language: str, chat_id: str) -> Pipel
         r'docker.*compose', r'docker-compose',
         r'terraform.*plan', r'terraform.*output',
         r'tar.*encrypt', r'encrypt.*tar', r'gpg.*encrypt',
+        # Long-running / event-driven tasks
+        r'log.*monitor', r'monitor.*log', r'matches.*summary',
+        r'key.?value.*store', r'socket.*server', r'server.*socket',
+        r'listener', r'listening.*port',
+        # Network tasks requiring real connectivity
+        r'fetch.*webpage', r'fetch.*url', r'webpage.*link', r'count.*link',
+        r'ssl.*cert', r'certificate.*expir', r'letsencrypt', r'cert.*renew',
+        r'check.*alive', r'check.*reachable',
+        # Tasks needing real services
+        r'service.*restart', r'restart.*service', r'systemctl',
+        r'journalctl',
     ]
     _is_untestable = any(re.search(pat, task_lower) for pat in _untestable_patterns)
     if _is_untestable:
