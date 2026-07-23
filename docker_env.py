@@ -141,15 +141,19 @@ def container_status():
 
 def exec_command(cmd, workdir="/workspace", timeout=30, demux=False):
     """Execute a command and return (exit_code, output_string).
-    If demux=True, returns (exit_code, stdout_string, stderr_string)."""
+    If demux=True, returns (exit_code, stdout_string, stderr_string).
+    Enforces timeout via 'timeout' bash wrapper — kills hanging processes."""
     container = get_container()
     if not container:
         if demux:
             return -1, "Container not running.", ""
         return -1, "Container not running."
+    # Write command to a temp script and run via 'timeout' to avoid quoting issues
+    import shlex
+    script_cmd = f"timeout --signal=TERM --kill-after=2 {timeout} bash -c {shlex.quote(cmd)}"
     try:
         exit_code, output = container.exec_run(
-            ["bash", "-c", cmd],
+            ["bash", "-c", script_cmd],
             workdir=workdir,
             demux=demux,
         )
@@ -190,13 +194,17 @@ def write_file(path, content, workdir="/workspace"):
         return False
     if isinstance(content, str):
         content = content.encode("utf-8")
+    # Ensure parent directory exists
+    parent = os.path.dirname(path)
+    if parent:
+        exec_command(f"mkdir -p {parent}", timeout=10)
     tar_buffer = io.BytesIO()
     with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
         info = tarfile.TarInfo(name=os.path.basename(path))
         info.size = len(content)
         tar.addfile(info, io.BytesIO(content))
     tar_buffer.seek(0)
-    container.put_archive(os.path.dirname(path) or workdir, tar_buffer)
+    container.put_archive(parent or workdir, tar_buffer)
     return True
 
 
