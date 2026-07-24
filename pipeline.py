@@ -2442,6 +2442,36 @@ def _exec_generate(p: Pipeline, task: str, language: str, plan: dict,
                         _write_file(filename, code)
                         lint_errors = fix_errors
 
+            # TOOL LOOP: run → fix → re-run (max 1 retry)
+            # Only for code that doesn't need args or input (avoid false crashes)
+            _needs_args = _detect_code_needs_args(code)
+            _has_input = bool(re.search(r'\binput\s*\(', code))
+            if not _needs_args and not _has_input:
+                run_exit, run_out, run_err = docker_env.exec_command(
+                    _wrap_with_timeout(f"python3 {filename}", 15),
+                    timeout=20, demux=True)
+                if run_exit != 0:
+                    runtime_error = (run_err or run_out).strip()[-800:]
+                    if runtime_error and "SyntaxError" not in runtime_error:
+                        fix_prompt = (
+                            "Fix the runtime error in this Python code.\n"
+                            f"Error:\n{runtime_error}\n\n"
+                            f"Code:\n```python\n{code[:4000]}\n```\n\n"
+                            "Return ONLY the fixed code in a ```python block. "
+                            "Do NOT explain — just the code."
+                        )
+                        resp = _ollama(fix_prompt, max_tokens=4096)
+                        _, fixed = _extract_code(resp)
+                        if fixed and len(fixed) > 50:
+                            _write_file(filename, fixed)
+                            # Re-run to verify fix
+                            fix_exit, _, fix_err = docker_env.exec_command(
+                                _wrap_with_timeout(f"python3 {filename}", 15),
+                                timeout=20, demux=True)
+                            if fix_exit == 0 or (fix_exit != 0 and
+                                    len(fix_err or "") < len(runtime_error)):
+                                code = fixed
+
     p.finish_node("GENERATE", True,
                   f"Generated {len(code)} chars of {detected}",
                   {"language": detected, "code_len": len(code), "file": filename})
