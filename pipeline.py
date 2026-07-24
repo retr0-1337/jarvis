@@ -3395,7 +3395,10 @@ for i, args in enumerate(cases):
     cmd = [sys.executable, full_path] + args
     print(f"\\nTest {{i+1}}: " + " ".join(cmd))
     stdin_data = "\\n".join(mock_inputs) if has_input else None
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+    # When cwd=project_dir, use just entry_point (full_path is relative to workspace root)
+    run_path = entry_point if os.path.isdir(project_dir) else full_path
+    r = subprocess.run([sys.executable, run_path] + args,
+                       capture_output=True, text=True, timeout=30,
                        cwd=project_dir, input=stdin_data)
     out = r.stdout.strip()
     err = r.stderr.strip()
@@ -4981,9 +4984,9 @@ def run_pipeline(task: str, language: str = "", chat_id: str = "") -> Pipeline:
 
     # Clean workspace to avoid leftover files from previous runs
     docker_env.exec_command(
-        "rm -rf /workspace/tmp /workspace/pipeline_run* /workspace/*.py "
-        "/workspace/project_* /workspace/test_* 2>/dev/null; "
-        "mkdir -p /workspace/tmp", timeout=10)
+        "cd /workspace && find . -maxdepth 1 -not -name '.' -not -name 'test_dir*' "
+        "-exec rm -rf {} + 2>/dev/null; "
+        "mkdir -p /workspace/tmp", timeout=15)
 
     p = Pipeline(task, language)
     p.chat_id = chat_id  # For abort check: if chat is deleted mid-pipeline, stop
