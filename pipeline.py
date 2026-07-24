@@ -2472,6 +2472,61 @@ def _exec_generate(p: Pipeline, task: str, language: str, plan: dict,
                                     len(fix_err or "") < len(runtime_error)):
                                 code = fixed
 
+            # TOOL LOOP: run code → check output → fix if wrong (max 1 retry)
+            # For code that doesn't need args/input, run it and verify output
+            if not _needs_args and not _has_input:
+                _run_exit, _run_out, _run_err = docker_env.exec_command(
+                    _wrap_with_timeout(f"python3 {filename}", 20),
+                    timeout=25, demux=True)
+                _run_output = (_run_out or "").strip()
+                _run_errtext = (_run_err or "").strip()
+                if _run_exit != 0 and _run_errtext:
+                    # Code crashed — feed traceback to LLM for fix
+                    fix_prompt = (
+                        "Fix the runtime error in this Python code.\n"
+                        f"Task: {task}\n\n"
+                        f"Error:\n{_run_errtext[-800:]}\n\n"
+                        f"Code:\n```python\n{code[:4000]}\n```\n\n"
+                        "Return ONLY the fixed code in a ```python block."
+                    )
+                    resp = _ollama(fix_prompt, max_tokens=4096)
+                    _, fixed = _extract_code(resp)
+                    if fixed and len(fixed) > 50:
+                        _write_file(filename, fixed)
+                        _fix_exit, _fix_out, _fix_err = docker_env.exec_command(
+                            _wrap_with_timeout(f"python3 {filename}", 20),
+                            timeout=25, demux=True)
+                        if _fix_exit == 0:
+                            code = fixed
+                elif _run_exit == 0 and _run_output:
+                    # Code ran — ask LLM if output matches the task
+                    verify_prompt = (
+                        f"Task: {task}\n\n"
+                        f"Code output:\n{_run_output[:1000]}\n\n"
+                        "Does this output correctly satisfy the task? "
+                        "Reply ONLY 'YES' or 'NO' with a one-line reason."
+                    )
+                    verdict = _ollama(verify_prompt, max_tokens=100).strip()
+                    if verdict.upper().startswith("NO"):
+                        fix_prompt = (
+                            "Your code ran but produced wrong output.\n"
+                            f"Task: {task}\n\n"
+                            f"Your output:\n{_run_output[:1000]}\n\n"
+                            f"LLM says: {verdict}\n\n"
+                            f"Code:\n```python\n{code[:4000]}\n```\n\n"
+                            "Fix the code so it produces the correct output. "
+                            "Return ONLY the fixed code in a ```python block."
+                        )
+                        resp = _ollama(fix_prompt, max_tokens=4096)
+                        _, fixed = _extract_code(resp)
+                        if fixed and len(fixed) > 50:
+                            _write_file(filename, fixed)
+                            _fix_exit2, _fix_out2, _fix_err2 = docker_env.exec_command(
+                                _wrap_with_timeout(f"python3 {filename}", 20),
+                                timeout=25, demux=True)
+                            if _fix_exit2 == 0:
+                                code = fixed
+
     p.finish_node("GENERATE", True,
                   f"Generated {len(code)} chars of {detected}",
                   {"language": detected, "code_len": len(code), "file": filename})
