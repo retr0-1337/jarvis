@@ -1033,6 +1033,26 @@ _FROM_IMPORTS = {
 }
 
 
+def _lint_python_code(code: str, filename: str = "tmp/lint_check.py") -> list[str]:
+    """Run flake8 on Python code, return list of fatal errors (F82, E9, F63, F7).
+    Only returns errors that will definitely crash at runtime."""
+    if not code or not code.strip():
+        return []
+    _write_file(filename, code)
+    exit_code, stdout, stderr = docker_env.exec_command(
+        f"flake8 --max-line-length=120 --select=E9,F63,F7,F82 {filename}",
+        timeout=15, demux=True)
+    errors = []
+    for line in (stdout + stderr).strip().split("\n"):
+        line = line.strip()
+        if line and ":" in line:
+            # Format: file:line:col: CODE message
+            parts = line.split(":", 3)
+            if len(parts) >= 4:
+                errors.append(parts[3].strip())
+    return errors
+
+
 def _fix_missing_imports(code: str, language: str = "python") -> str:
     """Detect missing imports in Python code and prepend them.
     Returns the code with imports added at the top."""
@@ -2250,6 +2270,28 @@ def _exec_generate(p: Pipeline, task: str, language: str, plan: dict,
                             generated_code[fname] = fixed_files[fname]
                             _write_file(f"{project_dir}/{fname}", fixed_files[fname])
 
+            # TOOL LOOP: lint all files → fix errors
+            if detected.lower() == "python":
+                for fname, fcode in list(generated_code.items()):
+                    fpath = f"{project_dir}/{fname}"
+                    lint_errors = _lint_python_code(fcode, fpath)
+                    if lint_errors:
+                        fix_prompt = (
+                            "Fix the following errors in this Python file.\n"
+                            f"File: {fname}\n"
+                            f"Errors:\n" + "\n".join(f"  - {e}" for e in lint_errors) + "\n\n"
+                            f"Code:\n```python\n{fcode[:4000]}\n```\n\n"
+                            "Return ONLY the fixed code in a ```python block. "
+                            "Do NOT explain — just the code."
+                        )
+                        resp = _ollama(fix_prompt, max_tokens=4096)
+                        _, fixed = _extract_code(resp)
+                        if fixed and len(fixed) > 50:
+                            fix_errors = _lint_python_code(fixed, fpath)
+                            if len(fix_errors) < len(lint_errors):
+                                generated_code[fname] = fixed
+                                _write_file(fpath, fixed)
+
         file_list = ", ".join(all_written)
         p.finish_node("GENERATE", True,
                       f"Generated {len(all_written)} files: {file_list} "
@@ -2378,6 +2420,27 @@ def _exec_generate(p: Pipeline, task: str, language: str, plan: dict,
             _pkgs = _detect_package_needs(code, detected)
             if _pkgs:
                 _install_packages(_pkgs)
+
+            # TOOL LOOP: lint → fix → re-lint (max 1 retry)
+            lint_errors = _lint_python_code(code, filename)
+            if lint_errors:
+                fix_prompt = (
+                    "Fix the following errors in this Python code.\n"
+                    f"Errors:\n" + "\n".join(f"  - {e}" for e in lint_errors) + "\n\n"
+                    f"Code:\n```python\n{code[:4000]}\n```\n\n"
+                    "Return ONLY the fixed code in a ```python block. "
+                    "Do NOT explain — just the code."
+                )
+                resp = _ollama(fix_prompt, max_tokens=4096)
+                _, fixed = _extract_code(resp)
+                if fixed and len(fixed) > 50:
+                    # Re-lint the fix
+                    fix_errors = _lint_python_code(fixed, filename)
+                    if len(fix_errors) < len(lint_errors):
+                        # Fix improved things — use it
+                        code = fixed
+                        _write_file(filename, code)
+                        lint_errors = fix_errors
 
     p.finish_node("GENERATE", True,
                   f"Generated {len(code)} chars of {detected}",
